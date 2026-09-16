@@ -1,13 +1,17 @@
+
 from fastapi import FastAPI
 from pydantic import BaseModel
-from app.agent.graph import graph
 from langchain_core.messages import HumanMessage
 
+from app.agent.graph import graph
 
-app=FastAPI(title="AI voice agent")
+
+app = FastAPI(title="AI Voice Agent")
+
 
 class CallRequest(BaseModel):
-    message:str
+    session_id: str
+    message: str
 
 
 @app.get("/")
@@ -16,15 +20,29 @@ def root():
         "message": "AI Voice Agent is running"
     }
 
+
 @app.post("/call")
-def handle_call(request:CallRequest):
-    result=graph.invoke({
-        "messages":[
-            HumanMessage(content=request.message)
-        ],
-        "intent":""
-    })
+def handle_call(request: CallRequest):
+
+    config = {
+        "configurable": {
+            "thread_id": request.session_id
+        }
+    }
+
+    result = graph.invoke(
+        {
+            "messages": [
+                HumanMessage(content=request.message)
+            ]
+        },
+        config=config,
+    )
 
     return {
-        "intent":result["intent"]
+        "intent": result["intent"],
+        "response": result["messages"][-1].content,
     }
+
+
+
