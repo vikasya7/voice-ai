@@ -5,22 +5,30 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
-from app.agent.tools import check_availability
+
 from app.agent.state import AgentState, AppointmentDetails
+from app.agent.tools import (
+    check_availability,
+    book_appointment,
+)
 
 
 load_dotenv()
 
 
+# =========================================================
+# LLM
+# =========================================================
+
 llm = ChatOpenAI(
     model="gpt-5-mini",
-    temperature=0
+    temperature=0,
 )
 
 
-# -------------------------
+# =========================================================
 # INTENT CLASSIFICATION
-# -------------------------
+# =========================================================
 
 class IntentResult(BaseModel):
     intent: Literal[
@@ -28,7 +36,7 @@ class IntentResult(BaseModel):
         "faq",
         "lead",
         "human",
-        "other"
+        "other",
     ]
 
 
@@ -73,27 +81,33 @@ Customer message:
     }
 
 
-# -------------------------
+# =========================================================
 # RECEPTIONIST
-# -------------------------
+# =========================================================
 
 def receptionist_node(state: AgentState):
 
-    response = llm.invoke(state["messages"])
+    response = llm.invoke(
+        state["messages"]
+    )
 
     return {
         "messages": [response]
     }
 
 
-# -------------------------
-# APPOINTMENT EXTRACTION
-# -------------------------
+# =========================================================
+# APPOINTMENT DETAIL EXTRACTION
+# =========================================================
 
-details_llm = llm.with_structured_output(AppointmentDetails)
+details_llm = llm.with_structured_output(
+    AppointmentDetails
+)
 
 
-def extract_appointment_details(state: AgentState):
+def extract_appointment_details(
+    state: AgentState
+):
 
     user_message = state["messages"][-1].content
 
@@ -110,6 +124,7 @@ Extract:
 If a value is not provided, return null.
 
 For relative dates such as:
+
 - tomorrow
 - today
 - Monday
@@ -117,7 +132,7 @@ For relative dates such as:
 
 convert them into a clear date.
 
-Today's date should be considered the current date.
+Use the current date when interpreting relative dates.
 
 Customer message:
 {user_message}
@@ -138,25 +153,46 @@ Customer message:
     return updates
 
 
-# -------------------------
-# BOOKING
-# -------------------------
+# =========================================================
+# BOOKING NODE
+# =========================================================
 
 def booking_node(state: AgentState):
 
-    appointment_date = state.get("appointment_date", "")
-    appointment_time = state.get("appointment_time", "")
+    appointment_date = state.get(
+        "appointment_date",
+        ""
+    )
+
+    appointment_time = state.get(
+        "appointment_time",
+        ""
+    )
+
+    # -----------------------------------------------------
+    # Missing date
+    # -----------------------------------------------------
 
     if not appointment_date:
+
         return {
             "messages": [
                 AIMessage(
-                    content="Sure. What date would you like the appointment?"
+                    content=(
+                        "Sure. What date would you "
+                        "like the appointment?"
+                    )
                 )
             ]
         }
 
+
+    # -----------------------------------------------------
+    # Missing time
+    # -----------------------------------------------------
+
     if not appointment_time:
+
         return {
             "messages": [
                 AIMessage(
@@ -165,83 +201,258 @@ def booking_node(state: AgentState):
             ]
         }
 
+
+    # -----------------------------------------------------
+    # Check availability
+    # -----------------------------------------------------
+
+    is_available = check_availability(
+        appointment_date,
+        appointment_time,
+    )
+
+
+    # -----------------------------------------------------
+    # Slot unavailable
+    # -----------------------------------------------------
+
+    if not is_available:
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"Sorry, {appointment_time} is "
+                        f"already booked on "
+                        f"{appointment_date}. "
+                        f"Would you like another time?"
+                    )
+                )
+            ]
+        }
+
+
+    # -----------------------------------------------------
+    # Slot available
+    # -----------------------------------------------------
+
     return {
         "messages": [
             AIMessage(
                 content=(
-                    f"Great. You want an appointment on "
-                    f"{appointment_date} at {appointment_time}. "
-                    f"Let me check availability for you."
+                    f"{appointment_time} is available "
+                    f"on {appointment_date}. "
+                    f"Would you like me to book it?"
+                )
+            )
+        ],
+        "awaiting_confirmation": True,
+    }
+
+
+# =========================================================
+# CONFIRMATION CLASSIFIER
+# =========================================================
+
+class ConfirmationResult(BaseModel):
+
+    confirmed: bool
+
+
+confirmation_llm = llm.with_structured_output(
+    ConfirmationResult
+)
+
+
+
+def confirmation_node(state: AgentState):
+    user_message = state["messages"][-1].content
+
+    result = confirmation_llm.invoke(
+        f"""
+Determine whether the customer is confirming
+the appointment booking.
+
+Return confirmed=true when the customer clearly
+agrees to book.
+
+Examples:
+"yes" -> true
+"book it" -> true
+"confirm" -> true
+"go ahead" -> true
+"yes please" -> true
+
+Return confirmed=false when the customer declines
+or is not clearly confirming.
+
+Examples:
+"no" -> false
+"not now" -> false
+"I don't want it" -> false
+
+Customer message:
+{user_message}
+"""
+    )
+
+    if result.confirmed:
+        return {
+            "booking_confirmed": True,
+        }
+
+    return {
+        "booking_confirmed": False,
+        "awaiting_confirmation": False,
+        "messages": [
+            AIMessage(
+                content=(
+                    "No problem. I won't book it. "
+                    "Let me know if you'd like to choose "
+                    "another appointment time."
+                )
+            )
+        ],
+    }
+
+
+
+
+# =========================================================
+# ACTUAL BOOKING
+# =========================================================
+
+
+def confirm_booking_node(state: AgentState):
+
+    result = book_appointment(
+        session_id=state.get("session_id", ""),
+        customer_name=state.get(
+            "customer_name",
+            "Customer"
+        ),
+        appointment_date=state["appointment_date"],
+        appointment_time=state["appointment_time"],
+    )
+
+    if not result["success"]:
+        return {
+            "awaiting_confirmation": False,
+            "booking_confirmed": False,
+            "messages": [
+                AIMessage(
+                    content=result["message"]
+                )
+            ]
+        }
+
+    return {
+        "awaiting_confirmation": False,
+        "booking_confirmed": False,
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Your appointment is confirmed "
+                    f"for {state['appointment_date']} "
+                    f"at {state['appointment_time']}. "
+                    f"Your appointment ID is "
+                    f"{result['appointment_id']}."
                 )
             )
         ]
     }
 
-# -------------------------
+
+
+# =========================================================
 # FAQ
-# -------------------------
+# =========================================================
 
-def faq_node(state: AgentState):
+def faq_node(
+    state: AgentState
+):
 
     return {
         "messages": [
             AIMessage(
-                content="Sure, I can help answer your question."
+                content=(
+                    "Sure, I can help answer "
+                    "your question."
+                )
             )
         ]
     }
 
 
-# -------------------------
+# =========================================================
 # LEAD
-# -------------------------
+# =========================================================
 
-def lead_node(state: AgentState):
+def lead_node(
+    state: AgentState
+):
 
     return {
         "messages": [
             AIMessage(
-                content="Sure, I'd be happy to get some details from you."
+                content=(
+                    "Sure, I'd be happy to get "
+                    "some details from you."
+                )
             )
         ]
     }
 
 
-# -------------------------
-# HUMAN
-# -------------------------
+# =========================================================
+# HUMAN HANDOFF
+# =========================================================
 
-def human_node(state: AgentState):
+def human_node(
+    state: AgentState
+):
 
     return {
         "messages": [
             AIMessage(
-                content="Sure, I'll connect you with a human representative."
+                content=(
+                    "Sure, I'll connect you with "
+                    "a human representative."
+                )
             )
         ]
     }
 
 
-# -------------------------
+# =========================================================
 # OTHER
-# -------------------------
+# =========================================================
 
-def other_node(state: AgentState):
+def other_node(
+    state: AgentState
+):
 
     return {
         "messages": [
             AIMessage(
-                content="I'm sorry, I didn't quite understand that."
+                content=(
+                    "I'm sorry, I didn't quite "
+                    "understand that."
+                )
             )
         ]
     }
 
 
-# -------------------------
-# ROUTER
-# -------------------------
+# =========================================================
+# INTENT ROUTER
+# =========================================================
 
-def route_intent(state: AgentState):
+def route_intent(
+    state: AgentState
+):
 
     return state["intent"]
+
+
 
