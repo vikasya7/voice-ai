@@ -54,20 +54,50 @@ graph_builder.add_node("other", other_node)
 # START → INTENT
 # -------------------------
 
-def route_start(state: AgentState): 
-    """ Decide where a new user message should go. If we previously asked for booking confirmation, the new message should go directly to confirmation. Otherwise, start normal intent classification. """ 
-    if state.get("awaiting_confirmation", False): 
-        return "confirmation" 
+
+# -------------------------
+# START ROUTING
+# -------------------------
+
+def route_start(state: AgentState):
+    """
+    Decide where the customer's new message should go.
+
+    If we are waiting for booking confirmation:
+        → confirmation
+
+    If we are still collecting booking details:
+        → extract appointment details
+
+    Otherwise:
+        → normal intent classification
+    """
+
+    # Customer is answering:
+    # "Shall I book the appointment?"
+    if state.get("awaiting_confirmation", False):
+        return "confirmation"
+
+    # Customer is still providing:
+    # name / phone / service / date / time
+    if state.get("booking_in_progress", False):
+        return "extract_appointment_details"
+
+    # Completely new conversation
     return "intent"
+
 
 graph_builder.add_conditional_edges(
     START,
     route_start,
     {
-        "intent":"intent",
-        "confirmation":"confirmation"
+        "intent": "intent",
+        "extract_appointment_details": "extract_appointment_details",
+        "confirmation": "confirmation",
     }
 )
+
+
 
 
 

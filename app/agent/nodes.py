@@ -105,10 +105,10 @@ details_llm = llm.with_structured_output(
 )
 
 
+
 def extract_appointment_details(
     state: AgentState
 ):
-
     user_message = state["messages"][-1].content
 
     result = details_llm.invoke(
@@ -118,6 +118,8 @@ You extract appointment information from a customer's message.
 Extract:
 
 - customer_name
+- customer_phone
+- service
 - appointment_date
 - appointment_time
 
@@ -134,7 +136,22 @@ convert them into a clear date.
 
 Use the current date when interpreting relative dates.
 
+Examples:
+
+"I want a haircut tomorrow at 5 PM"
+→ appointment_date = tomorrow's date
+→ appointment_time = 17:00
+→ service = haircut
+
+"My name is Vikas and I need a haircut"
+→ customer_name = Vikas
+→ service = haircut
+
+"My number is 9876543210"
+→ customer_phone = 9876543210
+
 Customer message:
+
 {user_message}
 """
     )
@@ -143,6 +160,12 @@ Customer message:
 
     if result.customer_name:
         updates["customer_name"] = result.customer_name
+
+    if result.customer_phone:
+        updates["customer_phone"] = result.customer_phone
+
+    if result.service:
+        updates["service"] = result.service
 
     if result.appointment_date:
         updates["appointment_date"] = result.appointment_date
@@ -153,101 +176,104 @@ Customer message:
     return updates
 
 
+
+
 # =========================================================
 # BOOKING NODE
 # =========================================================
 
+
+
+
 def booking_node(state: AgentState):
+    customer_name = state.get("customer_name", "")
+    customer_phone = state.get("customer_phone", "")
+    service = state.get("service", "")
+    appointment_date = state.get("appointment_date", "")
+    appointment_time = state.get("appointment_time", "")
 
-    appointment_date = state.get(
-        "appointment_date",
-        ""
-    )
+    if not customer_name:
+        return {
+            "messages": [
+                AIMessage(content="Sure. May I have your name?")
+            ],
+            "booking_in_progress": True,
+        }
 
-    appointment_time = state.get(
-        "appointment_time",
-        ""
-    )
-
-    # -----------------------------------------------------
-    # Missing date
-    # -----------------------------------------------------
-
-    if not appointment_date:
-
+    if not customer_phone:
         return {
             "messages": [
                 AIMessage(
-                    content=(
-                        "Sure. What date would you "
-                        "like the appointment?"
-                    )
+                    content="Thanks. Could you please provide your phone number?"
                 )
-            ]
+            ],
+            "booking_in_progress": True,
         }
 
+    if not service:
+        return {
+            "messages": [
+                AIMessage(content="What service would you like to book?")
+            ],
+            "booking_in_progress": True,
+        }
 
-    # -----------------------------------------------------
-    # Missing time
-    # -----------------------------------------------------
+    if not appointment_date:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What date would you like the appointment?"
+                )
+            ],
+            "booking_in_progress": True,
+        }
 
     if not appointment_time:
-
         return {
             "messages": [
                 AIMessage(
                     content="What time would you prefer?"
                 )
-            ]
+            ],
+            "booking_in_progress": True,
         }
-
-
-    # -----------------------------------------------------
-    # Check availability
-    # -----------------------------------------------------
 
     is_available = check_availability(
         appointment_date,
         appointment_time,
     )
 
-
-    # -----------------------------------------------------
-    # Slot unavailable
-    # -----------------------------------------------------
-
     if not is_available:
-
         return {
             "messages": [
                 AIMessage(
                     content=(
-                        f"Sorry, {appointment_time} is "
-                        f"already booked on "
-                        f"{appointment_date}. "
-                        f"Would you like another time?"
+                        f"Sorry, {appointment_time} is already booked "
+                        f"on {appointment_date}. "
+                        f"What other time would you prefer?"
                     )
                 )
-            ]
+            ],
+            "booking_in_progress": True,
         }
-
-
-    # -----------------------------------------------------
-    # Slot available
-    # -----------------------------------------------------
 
     return {
         "messages": [
             AIMessage(
                 content=(
-                    f"{appointment_time} is available "
+                    f"Great, {appointment_time} is available "
                     f"on {appointment_date}. "
-                    f"Would you like me to book it?"
+                    f"I have you down for {service}. "
+                    f"Shall I book the appointment?"
                 )
             )
         ],
+        "booking_in_progress": False,
         "awaiting_confirmation": True,
     }
+
+
+
 
 
 # =========================================================
@@ -326,13 +352,12 @@ Customer message:
 def confirm_booking_node(state: AgentState):
 
     result = book_appointment(
-        session_id=state.get("session_id", ""),
-        customer_name=state.get(
-            "customer_name",
-            "Customer"
-        ),
-        appointment_date=state["appointment_date"],
-        appointment_time=state["appointment_time"],
+    session_id=state.get("session_id", ""),
+    customer_name=state.get("customer_name", "Customer"),
+    customer_phone=state.get("customer_phone"),
+    appointment_date=state["appointment_date"],
+    appointment_time=state["appointment_time"],
+    service=state.get("service"),
     )
 
     if not result["success"]:
