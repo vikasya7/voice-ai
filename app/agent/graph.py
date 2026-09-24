@@ -17,8 +17,11 @@ from app.agent.nodes import (
     human_node,
     other_node,
     route_intent,
+    extract_cancellation_details,
+    cancellation_node,
+    cancellation_confirmation_node,
+    confirm_cancellation_node,
 )
-
 
 
 graph_builder = StateGraph(AgentState)
@@ -47,7 +50,10 @@ graph_builder.add_node("lead", lead_node)
 graph_builder.add_node("human", human_node)
 
 graph_builder.add_node("other", other_node)
-
+graph_builder.add_node("extract_cancellation_details",extract_cancellation_details)
+graph_builder.add_node("cancellation",cancellation_node)
+graph_builder.add_node("cancellation_confirmation",cancellation_confirmation_node)
+graph_builder.add_node("confirm_cancellation",confirm_cancellation_node)
 
 
 # -------------------------
@@ -60,30 +66,48 @@ graph_builder.add_node("other", other_node)
 # -------------------------
 
 def route_start(state: AgentState):
-    """
-    Decide where the customer's new message should go.
 
-    If we are waiting for booking confirmation:
-        → confirmation
+    print("\n========== ROUTE START ==========")
 
-    If we are still collecting booking details:
-        → extract appointment details
+    print(
+        "awaiting_confirmation:",
+        state.get("awaiting_confirmation", False)
+    )
 
-    Otherwise:
-        → normal intent classification
-    """
+    print(
+        "awaiting_cancellation_confirmation:",
+        state.get("awaiting_cancellation_confirmation", False)
+    )
 
-    # Customer is answering:
-    # "Shall I book the appointment?"
+    print(
+        "booking_in_progress:",
+        state.get("booking_in_progress", False)
+    )
+
+    print(
+        "cancellation_in_progress:",
+        state.get("cancellation_in_progress", False)
+    )
+
+    print("intent:", state.get("intent"))
+
     if state.get("awaiting_confirmation", False):
+        print("🚦 ROUTING TO: confirmation")
         return "confirmation"
 
-    # Customer is still providing:
-    # name / phone / service / date / time
+    if state.get("awaiting_cancellation_confirmation", False):
+        print("🚦 ROUTING TO: cancellation_confirmation")
+        return "cancellation_confirmation"
+
     if state.get("booking_in_progress", False):
+        print("🚦 ROUTING TO: extract_appointment_details")
         return "extract_appointment_details"
 
-    # Completely new conversation
+    if state.get("cancellation_in_progress", False):
+        print("🚦 ROUTING TO: extract_cancellation_details")
+        return "extract_cancellation_details"
+
+    print("🚦 ROUTING TO: intent")
     return "intent"
 
 
@@ -94,9 +118,10 @@ graph_builder.add_conditional_edges(
         "intent": "intent",
         "extract_appointment_details": "extract_appointment_details",
         "confirmation": "confirmation",
-    }
+        "extract_cancellation_details": "extract_cancellation_details",
+        "cancellation_confirmation": "cancellation_confirmation",
+    },
 )
-
 
 
 
@@ -110,6 +135,7 @@ graph_builder.add_conditional_edges(
     route_intent,
     {
         "booking": "extract_appointment_details",
+        "cancel": "extract_cancellation_details",
         "faq": "faq",
         "lead": "lead",
         "human": "human",
@@ -151,6 +177,48 @@ graph_builder.add_conditional_edges(
     }
 )
 
+
+def route_cancellation_confirmation(state: AgentState):
+
+    print("🔥🔥 ROUTE CANCELLATION CONFIRMATION")
+    print(
+        "cancellation_confirmed:",
+        state.get("cancellation_confirmed", False)
+    )
+
+    if state.get("cancellation_confirmed", False):
+        return "confirm_cancellation"
+
+    return END
+
+
+
+graph_builder.add_conditional_edges(
+    "cancellation_confirmation",
+    route_cancellation_confirmation,
+    {
+        "confirm_cancellation": "confirm_cancellation",
+        END: END,
+    },
+)
+graph_builder.add_edge(
+    "extract_cancellation_details",
+    "cancellation"
+)
+
+graph_builder.add_edge(
+    "cancellation",
+    END
+)
+
+graph_builder.add_edge(
+    "confirm_cancellation",
+    END
+)
+
+
+
+
 # -------------------------
 # END
 # -------------------------
@@ -180,6 +248,8 @@ graph_builder.add_edge(
 )
 
 
+
+
 # SQLite checkpoint
 conn = sqlite3.connect(
     "checkpoints.db",
@@ -191,3 +261,12 @@ checkpointer = SqliteSaver(conn)
 graph = graph_builder.compile(
     checkpointer=checkpointer
 )
+print("\n========== EDGES ==========")
+
+for edge in graph.get_graph().edges:
+    print(edge)
+
+print("===========================\n")
+print("\n========== GRAPH STRUCTURE ==========")
+print(graph.get_graph().draw_ascii())
+print("=====================================\n")

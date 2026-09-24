@@ -20,6 +20,9 @@ class AgentState(TypedDict):
     booking_in_progress: bool
     awaiting_confirmation: bool
     booking_confirmed: bool
+    cancellation_in_progress: bool
+    awaiting_cancellation_confirmation: bool
+    cancellation_confirmed: bool
     
 
 
