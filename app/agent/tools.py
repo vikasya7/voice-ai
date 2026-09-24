@@ -66,3 +66,49 @@ def book_appointment(
         }
     finally:
         db.close()
+
+
+def find_appointment(
+    customer_phone:str,
+    appointment_date:str | None=None,
+    appointment_time:str | None=None
+):
+    db=SessionLocal()
+    try:
+        query=select(Appointment).where(
+            Appointment.customer_phone==customer_phone,
+            Appointment.status=="confirmed"
+        )
+
+        if appointment_date:
+            query=query.where(
+                Appointment.appointment_date==appointment_date
+            )
+
+        if appointment_time:
+            query=query.where(
+                Appointment.appointment_time==appointment_time
+            )
+        return db.scalar(query)
+    finally:
+        db.close()
+
+def cancel_appointment(appointment_id:int):
+    db=SessionLocal()
+
+    try:
+        appointment=db.get(Appointment,appointment_id)
+        if not appointment:
+            return {
+                "success":False,
+                "message":"Appointment"
+            }
+        appointment.status="cancelled"
+        db.commit()
+
+        return {
+            "success":True,
+            "appointment_id":appointment_id
+        }
+    finally:
+        db.close()

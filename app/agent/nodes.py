@@ -10,6 +10,8 @@ from app.agent.state import AgentState, AppointmentDetails
 from app.agent.tools import (
     check_availability,
     book_appointment,
+    find_appointment,
+    cancel_appointment
 )
 
 
@@ -33,43 +35,86 @@ llm = ChatOpenAI(
 class IntentResult(BaseModel):
     intent: Literal[
         "booking",
+        "cancel",
         "faq",
         "lead",
         "human",
-        "other",
+        "other"
     ]
 
 
 intent_llm = llm.with_structured_output(IntentResult)
 
 
-def intent_node(state: AgentState):
+class CancellationDetails(BaseModel):
+    customer_phone: str | None = None
+    appointment_date: str | None = None
+    appointment_time: str | None = None
 
+cancellation_details_llm = llm.with_structured_output(
+    CancellationDetails
+)
+
+def intent_node(state: AgentState):
     user_message = state["messages"][-1].content
 
     result = intent_llm.invoke(
         f"""
-You are an intent classifier for a small business AI receptionist.
+You are an intent classifier for a business receptionist.
 
-Classify the customer's CURRENT message into exactly one category.
+Classify the customer's message into exactly ONE category.
+
+Categories:
 
 booking:
-Customer wants to book, schedule, reschedule, cancel,
-or check availability for an appointment.
+The customer wants to create or make a NEW appointment.
+
+Examples:
+- "I want to book an appointment"
+- "Can I schedule a haircut?"
+- "I need an appointment tomorrow"
+
+cancel:
+The customer wants to CANCEL an EXISTING appointment.
+
+Examples:
+- "I want to cancel my appointment"
+- "Cancel my booking"
+- "I need to cancel my appointment"
+- "Please cancel my appointment"
+- "I don't want my appointment anymore"
+- "Can you cancel my booking?"
 
 faq:
-Customer wants general information such as business hours,
-location, services, or prices.
+The customer is asking a general question about the business.
+
+Examples:
+- "What time do you open?"
+- "How much does a haircut cost?"
+- "Where are you located?"
 
 lead:
-Customer is interested in purchasing a service,
-getting a quote, or discussing a potential service.
+The customer is interested in the business but is NOT asking to book
+or cancel an appointment.
+
+Examples:
+- "I'm interested in your services"
+- "Tell me more about your business"
 
 human:
-Customer wants to speak with a human.
+The customer wants to speak to a human.
+
+Examples:
+- "Can I talk to someone?"
+- "Connect me to an employee"
 
 other:
-Anything else.
+Anything that does not fit the categories above.
+
+IMPORTANT:
+If the customer says "cancel", "cancel my appointment",
+"cancel my booking", or similar language about cancelling
+an existing appointment, ALWAYS classify it as "cancel", NOT "lead".
 
 Customer message:
 {user_message}
@@ -481,3 +526,178 @@ def route_intent(
 
 
 
+def extract_cancellation_details(state: AgentState):
+    print("🔥 EXTRACT CANCELLATION DETAILS")
+
+    user_message = state["messages"][-1].content
+
+    result = cancellation_details_llm.invoke(
+        f"""
+Extract the customer's phone number from this message.
+
+Customer message:
+{user_message}
+
+If no phone number is present, return null.
+"""
+    )
+
+    print("🔥 EXTRACTED:", result)
+
+    updates = {}
+
+    if result.customer_phone:
+        updates["customer_phone"] = result.customer_phone
+
+    return updates
+
+
+def cancellation_node(state: AgentState):
+    customer_phone = state.get("customer_phone", "")
+    appointment_date = state.get("appointment_date", "")
+    appointment_time = state.get("appointment_time", "")
+
+    print("🔥 CANCELLATION NODE")
+    print("PHONE:", customer_phone)
+    print("DATE:", appointment_date)
+    print("TIME:", appointment_time)
+
+    if not customer_phone:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "Sure. Please provide the phone number "
+                        "associated with your appointment."
+                    )
+                )
+            ],
+            "cancellation_in_progress": True,
+        }
+
+    appointment = find_appointment(
+        customer_phone=customer_phone,
+        appointment_date=appointment_date or None,
+        appointment_time=appointment_time or None,
+    )
+
+    if not appointment:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I couldn't find a confirmed appointment "
+                        "with those details."
+                    )
+                )
+            ],
+            "cancellation_in_progress": False,
+        }
+    print("🔥 CANCELLATION NODE RETURNING CONFIRMATION")
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"I found your appointment for "
+                    f"{appointment.appointment_date} at "
+                    f"{appointment.appointment_time}. "
+                    f"Would you like me to cancel it?"
+                )
+            )
+        ],
+        "cancellation_in_progress": False,
+        "awaiting_cancellation_confirmation": True,
+    }
+
+def cancellation_confirmation_node(state: AgentState):
+    user_message = state["messages"][-1].content
+
+    result = confirmation_llm.invoke(
+        f"""
+Determine whether the customer clearly confirms
+that they want to cancel their appointment.
+
+Return confirmed=true for:
+
+"yes"
+"cancel it"
+"yes please"
+"go ahead"
+"confirm"
+
+Return confirmed=false for:
+
+"no"
+"don't cancel"
+"not now"
+
+Customer message:
+
+{user_message}
+"""
+    )
+
+    if result.confirmed:
+        return {
+            "cancellation_confirmed": True
+        }
+
+    return {
+        "cancellation_confirmed": False,
+        "awaiting_cancellation_confirmation": False,
+        "messages": [
+            AIMessage(
+                content="No problem. I won't cancel your appointment."
+            )
+        ],
+    }
+
+
+def confirm_cancellation_node(state: AgentState):
+    print("🔥🔥🔥 CONFIRM CANCELLATION NODE EXECUTED")
+    customer_phone = state.get("customer_phone", "")
+    appointment_date = state.get("appointment_date", "")
+    appointment_time = state.get("appointment_time", "")
+
+    appointment = find_appointment(
+        customer_phone=customer_phone,
+        appointment_date=appointment_date or None,
+        appointment_time=appointment_time or None,
+    )
+
+    if not appointment:
+        return {
+            "awaiting_cancellation_confirmation": False,
+            "cancellation_confirmed": False,
+            "messages": [
+                AIMessage(
+                    content="I couldn't find that appointment."
+                )
+            ],
+        }
+
+    result = cancel_appointment(appointment.id)
+
+    if not result["success"]:
+        return {
+            "awaiting_cancellation_confirmation": False,
+            "cancellation_confirmed": False,
+            "messages": [
+                AIMessage(content=result["message"])
+            ],
+        }
+
+    return {
+        "awaiting_cancellation_confirmation": False,
+        "cancellation_confirmed": False,
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Your appointment for "
+                    f"{appointment.appointment_date} at "
+                    f"{appointment.appointment_time} "
+                    f"has been cancelled successfully."
+                )
+            )
+        ],
+    }
