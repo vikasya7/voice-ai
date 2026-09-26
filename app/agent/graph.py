@@ -21,6 +21,11 @@ from app.agent.nodes import (
     cancellation_node,
     cancellation_confirmation_node,
     confirm_cancellation_node,
+    extract_reschedule_details,
+    reschedule_node,
+    reschedule_confirmation_node,
+    confirm_reschedule_node,
+    extract_lead_details
 )
 
 
@@ -54,8 +59,22 @@ graph_builder.add_node("extract_cancellation_details",extract_cancellation_detai
 graph_builder.add_node("cancellation",cancellation_node)
 graph_builder.add_node("cancellation_confirmation",cancellation_confirmation_node)
 graph_builder.add_node("confirm_cancellation",confirm_cancellation_node)
+graph_builder.add_node("extract_reschedule_details",extract_reschedule_details)
+graph_builder.add_node("reschedule",reschedule_node)
+graph_builder.add_node(
+    "reschedule_confirmation",
+    reschedule_confirmation_node
+)
+graph_builder.add_node(
+    "confirm_reschedule",
+    confirm_reschedule_node
+)
 
 
+graph_builder.add_node(
+    "extract_lead_details",
+    extract_lead_details
+)
 # -------------------------
 # START → INTENT
 # -------------------------
@@ -67,47 +86,27 @@ graph_builder.add_node("confirm_cancellation",confirm_cancellation_node)
 
 def route_start(state: AgentState):
 
-    print("\n========== ROUTE START ==========")
-
-    print(
-        "awaiting_confirmation:",
-        state.get("awaiting_confirmation", False)
-    )
-
-    print(
-        "awaiting_cancellation_confirmation:",
-        state.get("awaiting_cancellation_confirmation", False)
-    )
-
-    print(
-        "booking_in_progress:",
-        state.get("booking_in_progress", False)
-    )
-
-    print(
-        "cancellation_in_progress:",
-        state.get("cancellation_in_progress", False)
-    )
-
-    print("intent:", state.get("intent"))
-
     if state.get("awaiting_confirmation", False):
-        print("🚦 ROUTING TO: confirmation")
         return "confirmation"
 
     if state.get("awaiting_cancellation_confirmation", False):
-        print("🚦 ROUTING TO: cancellation_confirmation")
         return "cancellation_confirmation"
 
+    if state.get("awaiting_reschedule_confirmation", False):
+        return "reschedule_confirmation"
+
     if state.get("booking_in_progress", False):
-        print("🚦 ROUTING TO: extract_appointment_details")
         return "extract_appointment_details"
 
     if state.get("cancellation_in_progress", False):
-        print("🚦 ROUTING TO: extract_cancellation_details")
         return "extract_cancellation_details"
 
-    print("🚦 ROUTING TO: intent")
+    if state.get("reschedule_in_progress", False):
+        return "extract_reschedule_details"
+
+    if state.get("lead_in_progress", False):
+        return "extract_lead_details"
+
     return "intent"
 
 
@@ -120,6 +119,9 @@ graph_builder.add_conditional_edges(
         "confirmation": "confirmation",
         "extract_cancellation_details": "extract_cancellation_details",
         "cancellation_confirmation": "cancellation_confirmation",
+        "extract_reschedule_details": "extract_reschedule_details",
+        "reschedule_confirmation": "reschedule_confirmation",
+        "extract_lead_details": "extract_lead_details",
     },
 )
 
@@ -136,8 +138,9 @@ graph_builder.add_conditional_edges(
     {
         "booking": "extract_appointment_details",
         "cancel": "extract_cancellation_details",
+        "reschedule": "extract_reschedule_details",
         "faq": "faq",
-        "lead": "lead",
+        "lead": "extract_lead_details",
         "human": "human",
         "other": "other",
     },
@@ -153,12 +156,15 @@ graph_builder.add_edge(
     "booking"
 )
 
+
 # booking confirmation
 
 graph_builder.add_edge(
     "booking",
     END
 )
+
+
 
 
 def route_confirmation(state:AgentState):
@@ -216,6 +222,41 @@ graph_builder.add_edge(
     END
 )
 
+graph_builder.add_edge(
+    "extract_reschedule_details",
+    "reschedule"
+)
+
+graph_builder.add_edge(
+    "reschedule",
+    END
+)
+graph_builder.add_edge(
+    "extract_lead_details",
+    "lead"
+)
+
+def route_reschedule_confirmation(state: AgentState):
+    print("🔥 ROUTE RESCHEDULE CONFIRMATION")
+    print(
+        "reschedule_confirmed:",
+        state.get("reschedule_confirmed", False)
+    )
+
+    if state.get("reschedule_confirmed", False):
+        return "confirm_reschedule"
+
+    return END
+
+
+graph_builder.add_conditional_edges(
+    "reschedule_confirmation",
+    route_reschedule_confirmation,
+    {
+        "confirm_reschedule": "confirm_reschedule",
+        END: END,
+    }
+)
 
 
 
@@ -232,6 +273,9 @@ graph_builder.add_edge(
     END
 )
 
+
+
+
 graph_builder.add_edge(
     "lead",
     END
@@ -246,8 +290,19 @@ graph_builder.add_edge(
     "other",
     END
 )
+graph_builder.add_edge(
+    "confirm_reschedule",
+    END
+)
+graph_builder.add_edge(
+    "extract_lead_details",
+    "lead"
+)
 
-
+graph_builder.add_edge(
+    "lead",
+    END
+)
 
 
 # SQLite checkpoint

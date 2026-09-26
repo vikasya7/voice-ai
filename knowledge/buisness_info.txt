@@ -1,0 +1,24 @@
+Business Name: Demo Salon
+
+Opening Hours:
+Monday to Saturday: 9 AM to 7 PM
+Sunday: Closed
+
+Services:
+Haircut - ₹300
+Beard Trim - ₹150
+Hair Spa - ₹500
+
+Payment Methods:
+Cash
+UPI
+Card
+
+Location:
+123 Main Street, Bhubaneswar
+
+Cancellation Policy:
+Appointments can be cancelled before the appointment time.
+
+Rescheduling Policy:
+Appointments can be rescheduled subject to availability.

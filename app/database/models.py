@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, DateTime
+from sqlalchemy import String, DateTime,Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.database import Base
@@ -47,6 +47,56 @@ class Appointment(Base):
     status: Mapped[str] = mapped_column(
         String(30),
         default="confirmed"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+
+
+class Lead(Base):
+    __tablename__ = "lead"
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        autoincrement=True
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False
+    )
+
+    customer_name: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True
+    )
+
+    customer_phone: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True
+    )
+
+    service: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True
+    )
+
+    preferred_time: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True
+    )
+
+    requirement: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        default="new"
     )
 
     created_at: Mapped[datetime] = mapped_column(

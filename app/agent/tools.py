@@ -1,7 +1,7 @@
 from sqlalchemy import select 
 from app.database.database import SessionLocal 
 from app.database.models import Appointment
-
+from app.database.models import Lead
 
 
 
@@ -110,5 +110,97 @@ def cancel_appointment(appointment_id:int):
             "success":True,
             "appointment_id":appointment_id
         }
+    finally:
+        db.close()
+
+
+def reschedule_appointment(
+    appointment_id:int,
+    new_date:str,
+    new_time:str
+):
+    db=SessionLocal()
+
+
+    try:
+        appointment=db.get(
+            Appointment,
+            appointment_id
+        )
+
+        if not appointment:
+            return {
+                "success":False,
+                "message":"Appointment not found"
+            }
+
+        existing=db.scalar(
+            select(Appointment).where(
+                Appointment.appointment_date==new_date,
+                Appointment.appointment_time==new_time,
+                Appointment.status=="confirmed",
+                Appointment.id!=appointment_id
+            )
+        )
+
+        if existing:
+            return {
+                "success": False,
+                "message": (
+                    "That appointment slot is no longer available."
+                )
+            }
+
+        appointment.appointment_date = new_date
+        appointment.appointment_time = new_time
+
+        db.commit()
+        db.refresh(appointment)
+
+        return {
+            "success": True,
+            "appointment_id": appointment.id
+        }
+
+    finally:
+        db.close()
+
+
+
+def save_lead(
+    session_id:str,
+    customer_name:str,
+    customer_phone:str,
+    service:str,
+    preferred_time:str,
+    requirement:str | None=None
+):
+    db=SessionLocal()
+    try:
+        lead=Lead(
+            session_id=session_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            service=service,
+            preferred_time=preferred_time,
+            requirement=requirement,
+            status="new",
+        )
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+
+        return {
+            "success":True,
+            "lead_id":lead.id
+        }
+    except Exception as e:
+        db.rollback()
+
+        return {
+            "success":False,
+            "message":str(e),
+        }
+
     finally:
         db.close()

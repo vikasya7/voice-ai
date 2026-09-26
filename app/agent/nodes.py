@@ -6,14 +6,16 @@ from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
 
-from app.agent.state import AgentState, AppointmentDetails
+from app.agent.state import AgentState, AppointmentDetails,RescheduleDetails,LeadDetails
 from app.agent.tools import (
     check_availability,
     book_appointment,
     find_appointment,
-    cancel_appointment
+    cancel_appointment,
+    reschedule_appointment,
+    save_lead
 )
-
+from app.rag.knowledge import get_retriever
 
 load_dotenv()
 
@@ -36,6 +38,7 @@ class IntentResult(BaseModel):
     intent: Literal[
         "booking",
         "cancel",
+        "reschedule",
         "faq",
         "lead",
         "human",
@@ -110,6 +113,15 @@ Examples:
 
 other:
 Anything that does not fit the categories above.
+
+Classify as "reschedule" when the customer wants
+to change an existing appointment.
+
+Examples:
+"I want to reschedule my appointment"
+"I need to change my appointment"
+"Can I move my appointment to tomorrow?"
+"I want to change my appointment time"
 
 IMPORTANT:
 If the customer says "cancel", "cancel my appointment",
@@ -701,3 +713,545 @@ def confirm_cancellation_node(state: AgentState):
             )
         ],
     }
+
+reschedule_details_llm = llm.with_structured_output(
+    RescheduleDetails
+)
+
+
+def extract_reschedule_details(state: AgentState):
+    print("🔥 EXTRACT RESCHEDULE DETAILS")
+
+    user_message = state["messages"][-1].content
+
+    result = reschedule_details_llm.invoke(
+        f"""
+Extract rescheduling information from the customer's message.
+
+Extract:
+
+- customer_phone
+- appointment_date
+- appointment_time
+
+For appointment_date and appointment_time,
+extract the NEW date and NEW time that the customer
+wants to reschedule to.
+
+If a value is not provided, return null.
+
+Examples:
+
+"I want to reschedule my appointment"
+→ customer_phone = null
+→ appointment_date = null
+→ appointment_time = null
+
+"My phone number is 9876543210"
+→ customer_phone = 9876543210
+→ appointment_date = null
+→ appointment_time = null
+
+"Move it to tomorrow at 6 PM"
+→ appointment_date = tomorrow's date
+→ appointment_time = 18:00
+
+"My number is 9876543210, move my appointment
+to tomorrow at 6 PM"
+→ customer_phone = 9876543210
+→ appointment_date = tomorrow's date
+→ appointment_time = 18:00
+
+Customer message:
+{user_message}
+"""
+    )
+
+    print("🔥 RESCHEDULE EXTRACTED:", result)
+
+    updates = {}
+
+    if result.customer_phone:
+        updates["customer_phone"] = result.customer_phone
+
+    if result.appointment_date:
+        updates["appointment_date"] = result.appointment_date
+
+    if result.appointment_time:
+        updates["appointment_time"] = result.appointment_time
+
+    return updates
+
+
+def reschedule_node(state:AgentState):
+    customer_phone=state.get("customer_phone","")
+    new_date=state.get("appointment_date","")
+    new_time=state.get("appointment_time","")
+
+    print("🔥 RESCHEDULE NODE")
+    print("PHONE:", customer_phone)
+    print("NEW DATE:", new_date)
+    print("NEW TIME:", new_time)
+
+    # ask for phone number
+    if not customer_phone:
+        return {
+            "messages":[
+                AIMessage(
+                    content=
+                    "Sure. Please provide the phone number "
+                        "associated with your appointment."
+                )
+            ],
+            "reschedule_in_progress": True,
+        }
+    # 2. Ask for new date
+    if not new_date:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What new date would you like for your appointment?"
+                )
+            ],
+            "reschedule_in_progress": True,
+        }
+
+    # 3. Ask for new time
+    if not new_time:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What new time would you prefer?"
+                )
+            ],
+            "reschedule_in_progress": True,
+        }
+    # 4. Find existing appointment
+    appointment = find_appointment(
+        customer_phone=customer_phone
+    )
+
+    if not appointment:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I couldn't find a confirmed appointment "
+                        "with that phone number."
+                    )
+                )
+            ],
+            "reschedule_in_progress": False,
+        }
+
+    # 5. Check whether new slot is available
+    is_available = check_availability(
+        new_date,
+        new_time
+    )
+    if not is_available:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"Sorry, {new_time} on {new_date} "
+                        "is already booked. "
+                        "What other time would you prefer?"
+                    )
+                )
+            ],
+            "reschedule_in_progress": True,
+        }
+
+    # 6. Ask for confirmation
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"I found your appointment for "
+                    f"{appointment.appointment_date} at "
+                    f"{appointment.appointment_time}. "
+                    f"Would you like to move it to "
+                    f"{new_date} at {new_time}?"
+                )
+            )
+        ],
+        "reschedule_in_progress": False,
+        "awaiting_reschedule_confirmation": True,
+    }
+
+
+def reschedule_confirmation_node(state:AgentState):
+    print("🔥 RESCHEDULE CONFIRMATION NODE")
+
+    user_message = state["messages"][-1].content
+
+    result = confirmation_llm.invoke(
+        f"""
+Determine whether the customer clearly confirms
+that they want to reschedule their appointment.
+
+Return confirmed=true for:
+"yes"
+"yes please"
+"go ahead"
+"confirm"
+"move it"
+
+Return confirmed=false for:
+"no"
+"don't change it"
+"not now"
+
+Customer message:
+{user_message}
+"""
+    )
+    print("🔥 RESCHEDULE CONFIRMATION RESULT:", result)
+    if result.confirmed:
+        return {
+            "reschedule_confirmed":True
+        }
+
+    return {
+        "reschedule_confirmed": False,
+        "awaiting_reschedule_confirmation": False,
+        "messages": [
+            AIMessage(
+                content=(
+                    "No problem. I won't change your appointment."
+                )
+            )
+        ],
+    }
+    
+
+def confirm_reschedule_node(state:AgentState):
+    print("🔥 CONFIRM RESCHEDULE")
+
+    customer_phone = state.get("customer_phone", "")
+    new_date = state.get("appointment_date", "")
+    new_time = state.get("appointment_time", "")
+
+    appointment=find_appointment(
+        customer_phone=customer_phone
+    )
+    if not appointment:
+        return {
+            "awaiting_reschedule_confirmation": False,
+            "reschedule_confirmed": False,
+            "messages": [
+                AIMessage(
+                    content="I couldn't find your appointment."
+                )
+            ],
+        }
+
+    result = reschedule_appointment(
+        appointment_id=appointment.id,
+        new_date=new_date,
+        new_time=new_time,
+    )
+    
+    if not result["success"]:
+        return {
+            "awaiting_reschedule_confirmation": False,
+            "reschedule_confirmed": False,
+            "messages": [
+                AIMessage(
+                    content=result["message"]
+                )
+            ],
+        }
+
+    return {
+        "awaiting_reschedule_confirmation": False,
+        "reschedule_confirmed": False,
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Your appointment has been rescheduled "
+                    f"to {new_date} at {new_time} successfully."
+                )
+            )
+        ],
+    }
+
+
+FAQS = {
+    "opening_hours": """
+We are open Monday to Saturday from 9 AM to 7 PM.
+We are closed on Sundays.
+""",
+
+    "location": """
+We are located at 123 Main Street.
+""",
+
+    "services": """
+We provide haircuts, hair styling, beard trimming,
+and grooming services.
+""",
+
+    "payment": """
+We accept cash, UPI, and card payments.
+""",
+}
+
+
+retriever = get_retriever()
+
+
+def faq_node(state: AgentState):
+    user_message = state["messages"][-1].content
+
+    docs = retriever.invoke(user_message)
+
+    context = "\n\n".join(
+        doc.page_content
+        for doc in docs
+    )
+
+    response = llm.invoke(
+        f"""
+You are a helpful receptionist.
+
+Answer the customer's question using ONLY
+the following business information.
+
+BUSINESS INFORMATION:
+{context}
+
+If the information needed to answer the question
+is not available, say:
+
+"I'm sorry, I don't have that information right now."
+
+Do not invent business information.
+
+Customer question:
+{user_message}
+"""
+    )
+
+    return {
+        "messages": [
+            AIMessage(content=response.content)
+        ]
+    }
+
+
+lead_details_llm = llm.with_structured_output(LeadDetails)
+
+
+def extract_lead_details(state: AgentState):
+    print("🔥 EXTRACT LEAD DETAILS")
+
+    user_message = state["messages"][-1].content
+
+    result = lead_details_llm.invoke(
+        f"""
+Extract lead/customer information from the customer's message.
+
+Extract:
+- customer_name
+- customer_phone
+- service
+- preferred_time
+- requirement
+
+If a value is not provided, return null.
+
+Examples:
+
+"My name is Vikas"
+→ customer_name = Vikas
+
+"My number is 9876543210"
+→ customer_phone = 9876543210
+
+"I'm interested in hair spa"
+→ service = hair spa
+
+"I want to visit Saturday evening"
+→ preferred_time = Saturday evening
+
+"I want to know about hair treatment for damaged hair"
+→ requirement = hair treatment for damaged hair
+
+Customer message:
+{user_message}
+"""
+    )
+
+    print("🔥 LEAD EXTRACTED:", result)
+
+    updates = {}
+
+    if result.customer_name:
+        updates["customer_name"] = result.customer_name
+
+    if result.customer_phone:
+        updates["customer_phone"] = result.customer_phone
+
+    if result.service:
+        updates["service"] = result.service
+
+    if result.preferred_time:
+        updates["preferred_time"] = result.preferred_time
+
+    if result.requirement:
+        updates["requirement"] = result.requirement
+
+    return updates
+
+
+def lead_node(state: AgentState):
+    customer_name = state.get("customer_name", "")
+    customer_phone = state.get("customer_phone", "")
+    service = state.get("service", "")
+    preferred_time = state.get("preferred_time", "")
+    requirement = state.get("requirement", "")
+
+    print("🔥 LEAD NODE")
+    print("NAME:", customer_name)
+    print("PHONE:", customer_phone)
+    print("SERVICE:", service)
+    print("PREFERRED TIME:", preferred_time)
+    print("REQUIREMENT:", requirement)
+
+    if not customer_name:
+        return {
+            "messages": [
+                AIMessage(
+                    content="Sure. May I have your name?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not customer_phone:
+        return {
+            "messages": [
+                AIMessage(
+                    content="Thanks. What is the best phone number to reach you?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not service:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What service are you interested in?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not preferred_time:
+        return {
+            "messages": [
+                AIMessage(
+                    content="When would you prefer to visit?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Thanks, {customer_name}. I've noted your interest "
+                    f"in {service}. Our team will contact you at "
+                    f"{customer_phone} regarding your preferred time "
+                    f"of {preferred_time}."
+                )
+            )
+        ],
+        "lead_in_progress": False,
+    }
+
+
+def lead_node(state: AgentState):
+    customer_name = state.get("customer_name", "")
+    customer_phone = state.get("customer_phone", "")
+    service = state.get("service", "")
+    preferred_time = state.get("preferred_time", "")
+    requirement = state.get("requirement", "")
+
+    if not customer_name:
+        return {
+            "messages": [
+                AIMessage(content="Sure. May I have your name?")
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not customer_phone:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What is the best phone number to reach you?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not service:
+        return {
+            "messages": [
+                AIMessage(
+                    content="What service are you interested in?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    if not preferred_time:
+        return {
+            "messages": [
+                AIMessage(
+                    content="When would you prefer to visit?"
+                )
+            ],
+            "lead_in_progress": True,
+        }
+
+    # All required information collected
+    result = save_lead(
+        session_id=state["session_id"],
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        service=service,
+        preferred_time=preferred_time,
+        requirement=requirement,
+    )
+
+    if not result["success"]:
+        return {
+            "messages": [
+                AIMessage(
+                    content="I'm sorry, I couldn't save your information. Please try again."
+                )
+            ],
+            "lead_in_progress": False,
+        }
+
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Thanks, {customer_name}. I've noted your interest "
+                    f"in {service}. Our team will contact you at "
+                    f"{customer_phone}. Your lead reference is "
+                    f"{result['lead_id']}."
+                )
+            )
+        ],
+        "lead_in_progress": False,
+        "lead_saved": True,
+    }
+
