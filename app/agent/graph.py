@@ -324,4 +324,10 @@ for edge in graph.get_graph().edges:
 print("===========================\n")
 print("\n========== GRAPH STRUCTURE ==========")
 print(graph.get_graph().draw_ascii())
+#print(graph.get_graph().draw_mermaid())
 print("=====================================\n")
+
+#png = graph.get_graph().draw_mermaid_png()
+
+#with open("graph.png", "wb") as f:
+   # f.write(png)
