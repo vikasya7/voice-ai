@@ -175,15 +175,13 @@ from app.voice.audio import (
     mp3_to_twilio_ulaw,
     ulaw_to_base64,
 )
-
+import asyncio
 @app.websocket("/media")
 async def media_stream(websocket: WebSocket):
     await websocket.accept()
-
     print("📞 Twilio Media Stream connected")
 
     audio_buffer = bytearray()
-
     silence_chunks = 0
     speech_detected = False
 
@@ -193,88 +191,73 @@ async def media_stream(websocket: WebSocket):
 
     stream_sid = None
     session_id = None
-
     agent_speaking = False
-    connection_alive = True
 
     try:
+        while True:
 
-        while connection_alive:
-
-            # --------------------------------------------------
+            # -----------------------------------
             # RECEIVE MESSAGE FROM TWILIO
-            # --------------------------------------------------
-
+            # -----------------------------------
             try:
                 message = await websocket.receive_json()
-
+            except WebSocketDisconnect as e:
+                print(f"📞 Twilio WebSocket disconnected: code={e.code}")
+                break
             except Exception as e:
-                print(f"⚠️ WebSocket receive error: {e}")
-                connection_alive = False
+                print(
+                    f"⚠️ WebSocket receive error: "
+                    f"{type(e).__name__}: {e}"
+                )
                 break
 
             event = message.get("event")
 
-            # ==================================================
+            # -----------------------------------
             # CONNECTED
-            # ==================================================
-
+            # -----------------------------------
             if event == "connected":
 
                 print("🔗 Twilio connected")
 
-            # ==================================================
+            # -----------------------------------
             # START
-            # ==================================================
-
+            # -----------------------------------
             elif event == "start":
 
                 print("▶️ Stream started")
 
                 stream_sid = message["start"]["streamSid"]
-
                 session_id = stream_sid
 
                 print(f"🆔 Session ID: {session_id}")
 
-            # ==================================================
-            # MEDIA
-            # ==================================================
-
+            # -----------------------------------
+            # INCOMING AUDIO
+            # -----------------------------------
             elif event == "media":
 
-                # --------------------------------------------------
-                # Ignore caller audio while agent is speaking
-                # --------------------------------------------------
-
+                # Don't process caller audio while
+                # agent audio is playing.
                 if agent_speaking:
                     continue
 
                 payload = message["media"]["payload"]
 
-                # --------------------------------------------------
-                # Convert Twilio μ-law → PCM
-                # --------------------------------------------------
-
+                # Twilio μ-law → PCM
                 pcm_audio = twilio_ulaw_to_pcm(payload)
-
-                # --------------------------------------------------
-                # Voice activity detection
-                # --------------------------------------------------
 
                 speaking = is_speech(
                     pcm_audio,
                     SILENCE_THRESHOLD
                 )
 
-                # ==================================================
-                # CALLER SPEAKING
-                # ==================================================
-
+                # -----------------------------------
+                # CALLER IS SPEAKING
+                # -----------------------------------
                 if speaking:
 
                     if not speech_detected:
-
                         print("🎤 Caller started speaking")
 
                     speech_detected = True
@@ -283,10 +266,9 @@ async def media_stream(websocket: WebSocket):
 
                     silence_chunks = 0
 
-                # ==================================================
-                # CALLER SILENT
-                # ==================================================
-
+                # -----------------------------------
+                # SILENCE
+                # -----------------------------------
                 else:
 
                     if not speech_detected:
@@ -294,12 +276,13 @@ async def media_stream(websocket: WebSocket):
 
                     silence_chunks += 1
 
+                    # Keep the silence at the end of
+                    # the caller's sentence.
                     audio_buffer.extend(pcm_audio)
 
-                # ==================================================
-                # DETECT END OF SPEECH
-                # ==================================================
-
+                # -----------------------------------
+                # CALLER FINISHED SPEAKING
+                # -----------------------------------
                 if (
                     speech_detected
                     and silence_chunks >= SILENCE_CHUNKS_REQUIRED
@@ -309,43 +292,29 @@ async def media_stream(websocket: WebSocket):
                     print("🤫 Caller stopped speaking")
 
                     print(
-                        f"🎵 Audio size: {len(audio_buffer)} bytes"
+                        f"🎵 Audio size: "
+                        f"{len(audio_buffer)} bytes"
                     )
 
-                    # --------------------------------------------------
-                    # Reset speech state immediately
-                    # --------------------------------------------------
+                    # -----------------------------------
+                    # COPY AUDIO AND RESET BUFFER
+                    # -----------------------------------
 
-                    speech_detected = False
-                    silence_chunks = 0
-
-                    # --------------------------------------------------
-                    # Copy audio and clear buffer
-                    # --------------------------------------------------
-
-                    audio_data = bytes(audio_buffer)
+                    current_audio = bytes(audio_buffer)
 
                     audio_buffer = bytearray()
+                    silence_chunks = 0
+                    speech_detected = False
 
-                    # ==================================================
-                    # CONVERT PCM → WAV
-                    # ==================================================
+                    # -----------------------------------
+                    # PCM → WAV
+                    # -----------------------------------
 
-                    try:
+                    wav_audio = pcm_to_wav(current_audio)
 
-                        wav_audio = pcm_to_wav(audio_data)
-
-                    except Exception as e:
-
-                        print(
-                            f"❌ PCM → WAV conversion failed: {e}"
-                        )
-
-                        continue
-
-                    # ==================================================
+                    # -----------------------------------
                     # SPEECH TO TEXT
-                    # ==================================================
+                    # -----------------------------------
 
                     try:
 
@@ -354,43 +323,26 @@ async def media_stream(websocket: WebSocket):
                             filename="twilio_turn.wav"
                         )
 
+                        print(
+                            f"📝 Transcript: {transcript}"
+                        )
+
                     except Exception as e:
 
                         print(
-                            f"❌ Speech-to-text failed: {e}"
+                            f"❌ STT error: "
+                            f"{type(e).__name__}: {e}"
                         )
 
                         continue
-
-                    print(f"📝 Transcript: {transcript}")
-
-                    # --------------------------------------------------
-                    # Ignore empty transcript
-                    # --------------------------------------------------
 
                     if not transcript.strip():
-
-                        print(
-                            "⚠️ Empty transcript. Ignoring."
-                        )
-
+                        print("⚠️ Empty transcript")
                         continue
 
-                    # ==================================================
-                    # CHECK CONNECTION BEFORE AGENT
-                    # ==================================================
-
-                    if not connection_alive:
-
-                        print(
-                            "⚠️ Call ended before agent processing."
-                        )
-
-                        break
-
-                    # ==================================================
-                    # SEND TO LANGGRAPH
-                    # ==================================================
+                    # -----------------------------------
+                    # LANGGRAPH
+                    # -----------------------------------
 
                     try:
 
@@ -416,65 +368,30 @@ async def media_stream(websocket: WebSocket):
                             config=config,
                         )
 
-                    except Exception as e:
-
-                        print(
-                            f"❌ Agent processing failed: {e}"
-                        )
-
-                        continue
-
-                    # ==================================================
-                    # GET AGENT RESPONSE
-                    # ==================================================
-
-                    try:
-
                         response_text = (
                             result["messages"][-1].content
                         )
 
+                        print(
+                            f"🤖 Agent: {response_text}"
+                        )
+
                     except Exception as e:
 
                         print(
-                            f"❌ Could not get agent response: {e}"
+                            f"❌ Agent error: "
+                            f"{type(e).__name__}: {e}"
                         )
 
                         continue
 
-                    print(
-                        f"🤖 Agent: {response_text}"
-                    )
-
-                    # ==================================================
-                    # CHECK CONNECTION BEFORE TTS
-                    # ==================================================
-
-                    if not connection_alive:
-
-                        print(
-                            "⚠️ Call ended before TTS."
-                        )
-
-                        break
-
-                    if not stream_sid:
-
-                        print(
-                            "⚠️ No stream SID. Skipping TTS."
-                        )
-
-                        continue
-
-                    # ==================================================
-                    # TEXT TO SPEECH
-                    # ==================================================
+                    # -----------------------------------
+                    # TTS
+                    # -----------------------------------
 
                     try:
 
-                        print(
-                            "🔊 Generating TTS..."
-                        )
+                        print("🔊 Generating TTS...")
 
                         agent_speaking = True
 
@@ -489,17 +406,18 @@ async def media_stream(websocket: WebSocket):
 
                     except Exception as e:
 
-                        print(
-                            f"❌ TTS generation failed: {e}"
-                        )
-
                         agent_speaking = False
+
+                        print(
+                            f"❌ TTS error: "
+                            f"{type(e).__name__}: {e}"
+                        )
 
                         continue
 
-                    # ==================================================
+                    # -----------------------------------
                     # MP3 → μ-LAW
-                    # ==================================================
+                    # -----------------------------------
 
                     try:
 
@@ -514,40 +432,32 @@ async def media_stream(websocket: WebSocket):
 
                     except Exception as e:
 
-                        print(
-                            f"❌ Audio conversion failed: {e}"
-                        )
-
                         agent_speaking = False
+
+                        print(
+                            f"❌ Audio conversion error: "
+                            f"{type(e).__name__}: {e}"
+                        )
 
                         continue
 
-                    # ==================================================
+                    # -----------------------------------
                     # SEND AUDIO TO TWILIO
-                    # ==================================================
-
-                    CHUNK_SIZE = 160
+                    # -----------------------------------
 
                     try:
+
+                        CHUNK_SIZE = 160
+
+                        print(
+                            "📤 Sending agent audio..."
+                        )
 
                         for i in range(
                             0,
                             len(ulaw_audio),
                             CHUNK_SIZE
                         ):
-
-                            # ------------------------------------------
-                            # Check connection before every chunk
-                            # ------------------------------------------
-
-                            if not connection_alive:
-
-                                print(
-                                    "⚠️ Call ended "
-                                    "while sending audio."
-                                )
-
-                                break
 
                             chunk = ulaw_audio[
                                 i:i + CHUNK_SIZE
@@ -560,66 +470,77 @@ async def media_stream(websocket: WebSocket):
                             await websocket.send_json(
                                 {
                                     "event": "media",
-
                                     "streamSid": stream_sid,
-
                                     "media": {
                                         "payload": payload
                                     },
                                 }
                             )
 
-                        # ------------------------------------------
-                        # Send mark only if connection is alive
-                        # ------------------------------------------
+                            # 160 bytes of 8kHz μ-law
+                            # = 20 milliseconds.
+                            await asyncio.sleep(0.02)
 
-                        if connection_alive:
+                        print(
+                            "📞 Agent audio sent to Twilio"
+                        )
 
-                            await websocket.send_json(
-                                {
-                                    "event": "mark",
+                    except WebSocketDisconnect as e:
 
-                                    "streamSid": stream_sid,
+                        print(
+                            f"❌ WebSocket disconnected "
+                            f"while sending audio: "
+                            f"code={e.code}"
+                        )
 
-                                    "mark": {
-                                        "name": "agent_response"
-                                    },
-                                }
-                            )
-
-                            print(
-                                "📞 Agent audio sent to Twilio"
-                            )
-
-                            print(
-                                "⏳ Waiting for Twilio "
-                                "playback to finish..."
-                            )
-
-                        else:
-
-                            print(
-                                "⚠️ Skipping mark "
-                                "because call ended."
-                            )
-
-                            agent_speaking = False
+                        break
 
                     except Exception as e:
 
                         print(
-                            f"⚠️ Failed to send audio "
-                            f"to Twilio: {e}"
+                            f"❌ Audio send error: "
+                            f"{type(e).__name__}: {e}"
                         )
 
-                        connection_alive = False
+                        break
 
-                        agent_speaking = False
+                    # -----------------------------------
+                    # MARK
+                    # -----------------------------------
 
-            # ==================================================
-            # MARK
-            # ==================================================
+                    try:
 
+                        print(
+                            "📍 Sending playback mark..."
+                        )
+
+                        await websocket.send_json(
+                            {
+                                "event": "mark",
+                                "streamSid": stream_sid,
+                                "mark": {
+                                    "name": "agent_response"
+                                },
+                            }
+                        )
+
+                        print(
+                            "⏳ Waiting for Twilio "
+                            "playback to finish..."
+                        )
+
+                    except Exception as e:
+
+                        print(
+                            f"❌ Mark send error: "
+                            f"{type(e).__name__}: {e}"
+                        )
+
+                        break
+
+            # -----------------------------------
+            # TWILIO MARK
+            # -----------------------------------
             elif event == "mark":
 
                 mark_name = (
@@ -641,56 +562,41 @@ async def media_stream(websocket: WebSocket):
                         "🎤 Listening for caller..."
                     )
 
-            # ==================================================
-            # STOP
-            # ==================================================
-
+            # -----------------------------------
+            # TWILIO STOP
+            # -----------------------------------
             elif event == "stop":
 
                 print("🛑 Stream stopped")
 
-                connection_alive = False
-
-                agent_speaking = False
-
                 break
 
-    # ==========================================================
-    # WEBSOCKET DISCONNECT
-    # ==========================================================
+            # -----------------------------------
+            # OTHER EVENTS
+            # -----------------------------------
+            else:
 
-    except WebSocketDisconnect:
+                print(
+                    f"ℹ️ Twilio event: {event}"
+                )
+
+    except WebSocketDisconnect as e:
 
         print(
-            "📞 Caller disconnected "
-            "(WebSocketDisconnect)"
+            f"📞 Twilio WebSocket disconnected: "
+            f"code={e.code}"
         )
-
-        connection_alive = False
-
-    # ==========================================================
-    # OTHER ERRORS
-    # ==========================================================
 
     except Exception as e:
 
         print(
-            f"❌ Media stream error: {e}"
+            f"❌ Media stream error: "
+            f"{type(e).__name__}: {e}"
         )
-
-        connection_alive = False
-
-    # ==========================================================
-    # CLEANUP
-    # ==========================================================
 
     finally:
 
-        connection_alive = False
-
         agent_speaking = False
-
-        audio_buffer.clear()
 
         print(
             "📞 Twilio Media Stream disconnected"
