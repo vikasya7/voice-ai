@@ -53,3 +53,5 @@ response.mp3
 test_audio.wav
 .gitignore
 .gitignore
+checkpoints.db-shm
+checkpoints.db-shm
