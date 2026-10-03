@@ -162,15 +162,20 @@ details_llm = llm.with_structured_output(
     AppointmentDetails
 )
 
+from datetime import datetime
 
-
-def extract_appointment_details(
-    state: AgentState
-):
+def extract_appointment_details(state: AgentState):
     user_message = state["messages"][-1].content
 
+    # Get the actual current date/time
+    now = datetime.now()
+
+    current_date = now.strftime("%Y-%m-%d")
+    current_day = now.strftime("%A")
+    current_time = now.strftime("%H:%M")
+
     result = details_llm.invoke(
-    f"""
+        f"""
 You extract appointment information from a customer's message.
 
 Extract:
@@ -182,47 +187,175 @@ Extract:
 
 If a value is not provided, return null.
 
-For phone numbers:
+IMPORTANT PHONE NUMBER RULES:
 
 - Convert spoken digits into numeric digits.
 - "one two three four five six seven eight nine"
   → "123456789"
-- "my number is one two three..."
-  → extract the complete numeric phone number.
-- Keep the phone number as digits.
-- Do not interpret a phone number as a date, name, or service.
 
-For relative dates such as:
-- tomorrow
-- today
-- Monday
-- next Friday
+- "my number is one two three four five six seven eight nine zero"
+  → "1234567890"
 
-convert them into a clear date.
+- Keep phone numbers as digits only.
+- Do not interpret a phone number as a date, time, name, or service.
+- Never modify the order of phone-number digits.
 
-Use the current date when interpreting relative dates.
+IMPORTANT TIME RULES:
+
+Convert appointment times into 24-hour HH:MM format.
+
+Examples:
+
+"5 PM"
+→ "17:00"
+
+"5 p.m."
+→ "17:00"
+
+"five PM"
+→ "17:00"
+
+"6 PM"
+→ "18:00"
+
+"6 p.m."
+→ "18:00"
+
+"six in the evening"
+→ "18:00"
+
+"6 in the evening"
+→ "18:00"
+
+"10 AM"
+→ "10:00"
+
+"10 p.m."
+→ "22:00"
+
+"12 PM"
+→ "12:00"
+
+"12 AM"
+→ "00:00"
+
+"half past 6"
+→ "18:30"
+
+"half past six in the evening"
+→ "18:30"
+
+"quarter past 5"
+→ "17:15"
+
+"quarter to 6"
+→ "17:45"
+
+If the customer says only a number such as "6" and the conversation
+clearly indicates they are choosing an appointment time, infer the
+most reasonable time from the conversation context.
+
+IMPORTANT:
+Do NOT confuse phone-number digits with appointment time.
+
+For example:
+
+Customer:
+"one two three four five six seven eight nine zero"
+
+This is a phone number, NOT 06:00, NOT 18:00, and NOT a date.
+
+IMPORTANT DATE RULES:
+
+Convert relative dates into YYYY-MM-DD format.
+
+Current date:
+{current_date}
+
+Current day:
+{current_day}
+
+Current time:
+{current_time}
+
+Examples:
+
+"today"
+→ today's date
+
+"tomorrow"
+→ tomorrow's date
+
+"Monday"
+→ the next appropriate Monday
+
+"next Friday"
+→ the next Friday after today
+
+"tomorrow at 5 PM"
+→ appointment_date = tomorrow's date
+→ appointment_time = "17:00"
+
+IMPORTANT:
+Use the current date above when calculating relative dates.
+Do not guess the current date.
+
+IMPORTANT SERVICE RULES:
+
+Extract the service exactly as the customer means it.
+
+Examples:
+
+"haircut"
+→ "haircut"
+
+"I want a haircut"
+→ "haircut"
+
+"hair spa"
+→ "hair spa"
+
+"hairspa"
+→ "hairspa"
+
+Do not confuse a person's name or phone number with a service.
+
+IMPORTANT NAME RULES:
+
+Extract only the customer's name.
+
+Examples:
+
+"My name is Vikas"
+→ customer_name = "Vikas"
+
+"I am Vikas Yadav"
+→ customer_name = "Vikas Yadav"
+
+If the customer is only providing a phone number, do not put it
+in customer_name.
 
 Examples:
 
 "I want a haircut tomorrow at 5 PM"
 → appointment_date = tomorrow's date
-→ appointment_time = 17:00
-→ service = haircut
+→ appointment_time = "17:00"
+→ service = "haircut"
 
 "My name is Vikas and I need a haircut"
-→ customer_name = Vikas
-→ service = haircut
+→ customer_name = "Vikas"
+→ service = "haircut"
 
 "My number is 9876543210"
-→ customer_phone = 9876543210
+→ customer_phone = "9876543210"
 
-"one two three four five six seven eight nine"
-→ customer_phone = 123456789
+"one two three four five six seven eight nine zero"
+→ customer_phone = "1234567890"
 
 Customer message:
 {user_message}
 """
-)
+    )
 
     updates = {}
 
