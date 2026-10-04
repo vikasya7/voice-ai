@@ -163,7 +163,11 @@ details_llm = llm.with_structured_output(
 )
 
 from datetime import datetime
-
+from app.voice.normalization import (
+    normalize_phone,
+    normalize_time,
+    normalize_date,
+)
 def extract_appointment_details(state: AgentState):
     user_message = state["messages"][-1].content
 
@@ -173,6 +177,10 @@ def extract_appointment_details(state: AgentState):
     current_date = now.strftime("%Y-%m-%d")
     current_day = now.strftime("%A")
     current_time = now.strftime("%H:%M")
+
+    # ---------------------------------------------------------
+    # LLM EXTRACTION
+    # ---------------------------------------------------------
 
     result = details_llm.invoke(
         f"""
@@ -190,15 +198,8 @@ If a value is not provided, return null.
 IMPORTANT PHONE NUMBER RULES:
 
 - Convert spoken digits into numeric digits.
-- "one two three four five six seven eight nine"
-  → "123456789"
-
-- "my number is one two three four five six seven eight nine zero"
-  → "1234567890"
-
 - Keep phone numbers as digits only.
-- Do not interpret a phone number as a date, time, name, or service.
-- Never modify the order of phone-number digits.
+- Do not interpret phone numbers as dates or times.
 
 IMPORTANT TIME RULES:
 
@@ -206,68 +207,23 @@ Convert appointment times into 24-hour HH:MM format.
 
 Examples:
 
-"5 PM"
-→ "17:00"
-
-"5 p.m."
-→ "17:00"
-
-"five PM"
-→ "17:00"
-
-"6 PM"
-→ "18:00"
-
-"6 p.m."
-→ "18:00"
-
-"six in the evening"
-→ "18:00"
-
-"6 in the evening"
-→ "18:00"
-
-"10 AM"
-→ "10:00"
-
-"10 p.m."
-→ "22:00"
-
-"12 PM"
-→ "12:00"
-
-"12 AM"
-→ "00:00"
-
-"half past 6"
-→ "18:30"
-
-"half past six in the evening"
-→ "18:30"
-
-"quarter past 5"
-→ "17:15"
-
-"quarter to 6"
-→ "17:45"
-
-If the customer says only a number such as "6" and the conversation
-clearly indicates they are choosing an appointment time, infer the
-most reasonable time from the conversation context.
-
-IMPORTANT:
-Do NOT confuse phone-number digits with appointment time.
-
-For example:
-
-Customer:
-"one two three four five six seven eight nine zero"
-
-This is a phone number, NOT 06:00, NOT 18:00, and NOT a date.
+"5 PM" → "17:00"
+"5 p.m." → "17:00"
+"five PM" → "17:00"
+"6 PM" → "18:00"
+"6 p.m." → "18:00"
+"six in the evening" → "18:00"
+"10 AM" → "10:00"
+"10 p.m." → "22:00"
+"12 PM" → "12:00"
+"12 AM" → "00:00"
+"half past 6" → "18:30"
+"quarter past 5" → "17:15"
+"quarter to 6" → "17:45"
 
 IMPORTANT DATE RULES:
 
-Convert relative dates into YYYY-MM-DD format.
+Convert relative dates into YYYY-MM-DD.
 
 Current date:
 {current_date}
@@ -280,71 +236,27 @@ Current time:
 
 Examples:
 
-"today"
-→ today's date
-
-"tomorrow"
-→ tomorrow's date
-
-"Monday"
-→ the next appropriate Monday
-
-"next Friday"
-→ the next Friday after today
-
-"tomorrow at 5 PM"
-→ appointment_date = tomorrow's date
-→ appointment_time = "17:00"
+"today" → today's date
+"tomorrow" → tomorrow's date
+"Monday" → next Monday
+"next Friday" → next Friday
 
 IMPORTANT:
-Use the current date above when calculating relative dates.
-Do not guess the current date.
 
-IMPORTANT SERVICE RULES:
+Do not confuse phone-number digits with appointment time.
 
-Extract the service exactly as the customer means it.
+SERVICE EXAMPLES:
 
-Examples:
+"haircut" → "haircut"
+"hair spa" → "hair spa"
+"hairspa" → "hairspa"
 
-"haircut"
-→ "haircut"
+NAME EXAMPLES:
 
-"I want a haircut"
-→ "haircut"
+"My name is Vikas" → customer_name = "Vikas"
+"I am Vikas Yadav" → customer_name = "Vikas Yadav"
 
-"hair spa"
-→ "hair spa"
-
-"hairspa"
-→ "hairspa"
-
-Do not confuse a person's name or phone number with a service.
-
-IMPORTANT NAME RULES:
-
-Extract only the customer's name.
-
-Examples:
-
-"My name is Vikas"
-→ customer_name = "Vikas"
-
-"I am Vikas Yadav"
-→ customer_name = "Vikas Yadav"
-
-If the customer is only providing a phone number, do not put it
-in customer_name.
-
-Examples:
-
-"I want a haircut tomorrow at 5 PM"
-→ appointment_date = tomorrow's date
-→ appointment_time = "17:00"
-→ service = "haircut"
-
-"My name is Vikas and I need a haircut"
-→ customer_name = "Vikas"
-→ service = "haircut"
+PHONE EXAMPLES:
 
 "My number is 9876543210"
 → customer_phone = "9876543210"
@@ -357,26 +269,87 @@ Customer message:
 """
     )
 
+    # ---------------------------------------------------------
+    # BUILD UPDATES
+    # ---------------------------------------------------------
+
     updates = {}
+
+    # ---------------------------------------------------------
+    # NAME
+    # ---------------------------------------------------------
 
     if result.customer_name:
         updates["customer_name"] = result.customer_name
 
+    # ---------------------------------------------------------
+    # PHONE
+    # ---------------------------------------------------------
+
     if result.customer_phone:
-        updates["customer_phone"] = result.customer_phone
+
+        normalized_phone = normalize_phone(
+            result.customer_phone
+        )
+
+        if normalized_phone:
+            updates["customer_phone"] = normalized_phone
+
+    # ---------------------------------------------------------
+    # SERVICE
+    # ---------------------------------------------------------
 
     if result.service:
         updates["service"] = result.service
 
-    if result.appointment_date:
-        updates["appointment_date"] = result.appointment_date
+    # ---------------------------------------------------------
+    # DATE
+    # ---------------------------------------------------------
 
-    if result.appointment_time:
-        updates["appointment_time"] = result.appointment_time
+    if result.appointment_date:
+
+        normalized_date = normalize_date(
+            result.appointment_date,
+            today=now.date(),
+        )
+
+        if normalized_date:
+            updates["appointment_date"] = normalized_date
+        else:
+            # If LLM already returned YYYY-MM-DD,
+            # preserve it.
+            updates["appointment_date"] = (
+                result.appointment_date
+            )
+
+    # ---------------------------------------------------------
+    # TIME
+    # ---------------------------------------------------------
+
+    # First try the original customer message.
+    #
+    # This is important because the LLM might return
+    # something like "16" when the caller actually said
+    # "6 PM".
+    normalized_time = normalize_time(user_message)
+
+    if normalized_time:
+        updates["appointment_time"] = normalized_time
+
+    elif result.appointment_time:
+        # Fall back to the LLM's extracted time.
+        normalized_time = normalize_time(
+            result.appointment_time
+        )
+
+        if normalized_time:
+            updates["appointment_time"] = normalized_time
+        else:
+            updates["appointment_time"] = (
+                result.appointment_time
+            )
 
     return updates
-
-
 
 
 # =========================================================
@@ -595,7 +568,7 @@ def confirm_booking_node(state: AgentState):
 
     return {
         "awaiting_confirmation": False,
-        "booking_confirmed": False,
+        "booking_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -869,7 +842,7 @@ def confirm_cancellation_node(state: AgentState):
 
     return {
         "awaiting_cancellation_confirmation": False,
-        "cancellation_confirmed": False,
+        "cancellation_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -1134,7 +1107,7 @@ def confirm_reschedule_node(state:AgentState):
 
     return {
         "awaiting_reschedule_confirmation": False,
-        "reschedule_confirmed": False,
+        "reschedule_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -1274,73 +1247,7 @@ Customer message:
     return updates
 
 
-def lead_node(state: AgentState):
-    customer_name = state.get("customer_name", "")
-    customer_phone = state.get("customer_phone", "")
-    service = state.get("service", "")
-    preferred_time = state.get("preferred_time", "")
-    requirement = state.get("requirement", "")
 
-    print("🔥 LEAD NODE")
-    print("NAME:", customer_name)
-    print("PHONE:", customer_phone)
-    print("SERVICE:", service)
-    print("PREFERRED TIME:", preferred_time)
-    print("REQUIREMENT:", requirement)
-
-    if not customer_name:
-        return {
-            "messages": [
-                AIMessage(
-                    content="Sure. May I have your name?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not customer_phone:
-        return {
-            "messages": [
-                AIMessage(
-                    content="Thanks. What is the best phone number to reach you?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not service:
-        return {
-            "messages": [
-                AIMessage(
-                    content="What service are you interested in?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not preferred_time:
-        return {
-            "messages": [
-                AIMessage(
-                    content="When would you prefer to visit?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    return {
-        "messages": [
-            AIMessage(
-                content=(
-                    f"Thanks, {customer_name}. I've noted your interest "
-                    f"in {service}. Our team will contact you at "
-                    f"{customer_phone} regarding your preferred time "
-                    f"of {preferred_time}."
-                )
-            )
-        ],
-        "lead_in_progress": False,
-    }
 
 
 def lead_node(state: AgentState):
