@@ -39,6 +39,9 @@ def test_time():
     assert normalize_time("quarter past five") == "05:15"
 
     assert normalize_time("quarter past five PM") == "17:15"
+    assert normalize_time("1-2-3-4-5-6-7-8-9-0") is None
+    assert normalize_time("1234567890") is None
+    assert normalize_time("haircut") is None
 
 
 def test_date():
