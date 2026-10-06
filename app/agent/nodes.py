@@ -168,10 +168,14 @@ from app.voice.normalization import (
     normalize_time,
     normalize_date,
 )
+import re
+from datetime import datetime
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage
 def extract_appointment_details(state: AgentState):
     user_message = state["messages"][-1].content
 
-    # Get the actual current date/time
     now = datetime.now()
 
     current_date = now.strftime("%Y-%m-%d")
@@ -179,39 +183,70 @@ def extract_appointment_details(state: AgentState):
     current_time = now.strftime("%H:%M")
 
     # ---------------------------------------------------------
-    # LLM EXTRACTION
+    # ONLY EXTRACT FIELDS THAT ARE STILL MISSING
     # ---------------------------------------------------------
+
+    missing_fields = []
+
+    if not state.get("customer_name"):
+        missing_fields.append("customer_name")
+
+    if not state.get("customer_phone"):
+        missing_fields.append("customer_phone")
+
+    if not state.get("service"):
+        missing_fields.append("service")
+
+    if not state.get("appointment_date"):
+        missing_fields.append("appointment_date")
+
+    if not state.get("appointment_time"):
+        missing_fields.append("appointment_time")
+
+    print("🔎 Missing appointment fields:", missing_fields)
+
+    # Nothing left to extract
+    if not missing_fields:
+        print("✅ All appointment details already collected")
+        return {}
+
+    # ---------------------------------------------------------
+    # BUILD EXTRACTION PROMPT ONLY FOR MISSING FIELDS
+    # ---------------------------------------------------------
+
+    fields_text = "\n".join(
+        f"- {field}"
+        for field in missing_fields
+    )
+    print("🧠 Sending details extraction to LLM...")
+    print("📝 Message:", user_message)
+    print("🎯 Fields:", missing_fields)
 
     result = details_llm.invoke(
         f"""
 You extract appointment information from a customer's message.
 
-Extract:
-- customer_name
-- customer_phone
-- service
-- appointment_date
-- appointment_time
+ONLY extract these missing fields:
+
+{fields_text}
 
 If a value is not provided, return null.
 
-IMPORTANT PHONE NUMBER RULES:
+IMPORTANT:
+Do NOT invent information.
 
+IMPORTANT PHONE NUMBER RULES:
 - Convert spoken digits into numeric digits.
 - Keep phone numbers as digits only.
 - Do not interpret phone numbers as dates or times.
 
 IMPORTANT TIME RULES:
-
 Convert appointment times into 24-hour HH:MM format.
 
 Examples:
-
 "5 PM" → "17:00"
 "5 p.m." → "17:00"
-"five PM" → "17:00"
 "6 PM" → "18:00"
-"6 p.m." → "18:00"
 "six in the evening" → "18:00"
 "10 AM" → "10:00"
 "10 p.m." → "22:00"
@@ -222,72 +257,63 @@ Examples:
 "quarter to 6" → "17:45"
 
 IMPORTANT DATE RULES:
-
 Convert relative dates into YYYY-MM-DD.
 
-Current date:
-{current_date}
-
-Current day:
-{current_day}
-
-Current time:
-{current_time}
+Current date: {current_date}
+Current day: {current_day}
+Current time: {current_time}
 
 Examples:
-
 "today" → today's date
 "tomorrow" → tomorrow's date
 "Monday" → next Monday
 "next Friday" → next Friday
 
-IMPORTANT:
-
-Do not confuse phone-number digits with appointment time.
-
 SERVICE EXAMPLES:
-
 "haircut" → "haircut"
 "hair spa" → "hair spa"
 "hairspa" → "hairspa"
 
 NAME EXAMPLES:
-
 "My name is Vikas" → customer_name = "Vikas"
 "I am Vikas Yadav" → customer_name = "Vikas Yadav"
 
 PHONE EXAMPLES:
-
-"My number is 9876543210"
-→ customer_phone = "9876543210"
-
+"My number is 9876543210" → customer_phone = "9876543210"
 "one two three four five six seven eight nine zero"
 → customer_phone = "1234567890"
+
+IMPORTANT:
+Do not interpret phone-number digits as appointment time.
+Do not extract fields that were not requested.
 
 Customer message:
 {user_message}
 """
     )
 
-    # ---------------------------------------------------------
-    # BUILD UPDATES
-    # ---------------------------------------------------------
-
     updates = {}
 
     # ---------------------------------------------------------
-    # NAME
+    # CUSTOMER NAME
     # ---------------------------------------------------------
 
-    if result.customer_name:
+    if (
+        "customer_name" in missing_fields
+        and result.customer_name
+        and not state.get("customer_name")
+    ):
         updates["customer_name"] = result.customer_name
 
     # ---------------------------------------------------------
-    # PHONE
+    # CUSTOMER PHONE
     # ---------------------------------------------------------
 
-    if result.customer_phone:
-
+    if (
+        "customer_phone" in missing_fields
+        and result.customer_phone
+        and not state.get("customer_phone")
+    ):
         normalized_phone = normalize_phone(
             result.customer_phone
         )
@@ -299,55 +325,75 @@ Customer message:
     # SERVICE
     # ---------------------------------------------------------
 
-    if result.service:
+    if (
+        "service" in missing_fields
+        and result.service
+        and not state.get("service")
+    ):
         updates["service"] = result.service
 
     # ---------------------------------------------------------
     # DATE
     # ---------------------------------------------------------
 
-    if result.appointment_date:
+    if (
+        "appointment_date" in missing_fields
+        and not state.get("appointment_date")
+    ):
 
+        # First try deterministic parsing from
+        # the actual customer message.
         normalized_date = normalize_date(
-            result.appointment_date,
+            user_message,
             today=now.date(),
         )
 
         if normalized_date:
             updates["appointment_date"] = normalized_date
-        else:
-            # If LLM already returned YYYY-MM-DD,
-            # preserve it.
-            updates["appointment_date"] = (
-                result.appointment_date
+
+        elif result.appointment_date:
+
+            normalized_date = normalize_date(
+                result.appointment_date,
+                today=now.date(),
             )
+
+            if normalized_date:
+                updates["appointment_date"] = normalized_date
 
     # ---------------------------------------------------------
     # TIME
     # ---------------------------------------------------------
 
-    # First try the original customer message.
-    #
-    # This is important because the LLM might return
-    # something like "16" when the caller actually said
-    # "6 PM".
-    normalized_time = normalize_time(user_message)
+    if (
+        "appointment_time" in missing_fields
+        and not state.get("appointment_time")
+    ):
 
-    if normalized_time:
-        updates["appointment_time"] = normalized_time
-
-    elif result.appointment_time:
-        # Fall back to the LLM's extracted time.
         normalized_time = normalize_time(
-            result.appointment_time
+            user_message
         )
+
+        print("🕐 TIME DEBUG")
+        print("User message:", user_message)
+        print("Normalized time:", normalized_time)
 
         if normalized_time:
             updates["appointment_time"] = normalized_time
-        else:
-            updates["appointment_time"] = (
+
+        elif result.appointment_time:
+            normalized_time = normalize_time(
                 result.appointment_time
             )
+
+            if normalized_time:
+                updates["appointment_time"] = normalized_time
+
+    # ---------------------------------------------------------
+    # DEBUG
+    # ---------------------------------------------------------
+
+    print("📦 EXTRACTION UPDATES:", updates)
 
     return updates
 
