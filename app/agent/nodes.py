@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
-
+from app.voice.normalization import normalize_phone
 from app.agent.state import AgentState, AppointmentDetails,RescheduleDetails,LeadDetails
 from app.agent.tools import (
     check_availability,
@@ -13,7 +13,8 @@ from app.agent.tools import (
     find_appointment,
     cancel_appointment,
     reschedule_appointment,
-    save_lead
+    save_lead,
+    create_human_handoff
 )
 from app.rag.knowledge import get_retriever
 
@@ -161,78 +162,240 @@ details_llm = llm.with_structured_output(
     AppointmentDetails
 )
 
+from datetime import datetime
+from app.voice.normalization import (
+    normalize_phone,
+    normalize_time,
+    normalize_date,
+)
+import re
+from datetime import datetime
 
-
-def extract_appointment_details(
-    state: AgentState
-):
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage
+def extract_appointment_details(state: AgentState):
     user_message = state["messages"][-1].content
+
+    now = datetime.now()
+
+    current_date = now.strftime("%Y-%m-%d")
+    current_day = now.strftime("%A")
+    current_time = now.strftime("%H:%M")
+
+    # ---------------------------------------------------------
+    # ONLY EXTRACT FIELDS THAT ARE STILL MISSING
+    # ---------------------------------------------------------
+
+    missing_fields = []
+
+    if not state.get("customer_name"):
+        missing_fields.append("customer_name")
+
+    if not state.get("customer_phone"):
+        missing_fields.append("customer_phone")
+
+    if not state.get("service"):
+        missing_fields.append("service")
+
+    if not state.get("appointment_date"):
+        missing_fields.append("appointment_date")
+
+    if not state.get("appointment_time"):
+        missing_fields.append("appointment_time")
+
+    print("🔎 Missing appointment fields:", missing_fields)
+
+    # Nothing left to extract
+    if not missing_fields:
+        print("✅ All appointment details already collected")
+        return {}
+
+    # ---------------------------------------------------------
+    # BUILD EXTRACTION PROMPT ONLY FOR MISSING FIELDS
+    # ---------------------------------------------------------
+
+    fields_text = "\n".join(
+        f"- {field}"
+        for field in missing_fields
+    )
+    print("🧠 Sending details extraction to LLM...")
+    print("📝 Message:", user_message)
+    print("🎯 Fields:", missing_fields)
 
     result = details_llm.invoke(
         f"""
 You extract appointment information from a customer's message.
 
-Extract:
+ONLY extract these missing fields:
 
-- customer_name
-- customer_phone
-- service
-- appointment_date
-- appointment_time
+{fields_text}
 
 If a value is not provided, return null.
 
-For relative dates such as:
+IMPORTANT:
+Do NOT invent information.
 
-- tomorrow
-- today
-- Monday
-- next Friday
+IMPORTANT PHONE NUMBER RULES:
+- Convert spoken digits into numeric digits.
+- Keep phone numbers as digits only.
+- Do not interpret phone numbers as dates or times.
 
-convert them into a clear date.
-
-Use the current date when interpreting relative dates.
+IMPORTANT TIME RULES:
+Convert appointment times into 24-hour HH:MM format.
 
 Examples:
+"5 PM" → "17:00"
+"5 p.m." → "17:00"
+"6 PM" → "18:00"
+"six in the evening" → "18:00"
+"10 AM" → "10:00"
+"10 p.m." → "22:00"
+"12 PM" → "12:00"
+"12 AM" → "00:00"
+"half past 6" → "18:30"
+"quarter past 5" → "17:15"
+"quarter to 6" → "17:45"
 
-"I want a haircut tomorrow at 5 PM"
-→ appointment_date = tomorrow's date
-→ appointment_time = 17:00
-→ service = haircut
+IMPORTANT DATE RULES:
+Convert relative dates into YYYY-MM-DD.
 
-"My name is Vikas and I need a haircut"
-→ customer_name = Vikas
-→ service = haircut
+Current date: {current_date}
+Current day: {current_day}
+Current time: {current_time}
 
-"My number is 9876543210"
-→ customer_phone = 9876543210
+Examples:
+"today" → today's date
+"tomorrow" → tomorrow's date
+"Monday" → next Monday
+"next Friday" → next Friday
+
+SERVICE EXAMPLES:
+"haircut" → "haircut"
+"hair spa" → "hair spa"
+"hairspa" → "hairspa"
+
+NAME EXAMPLES:
+"My name is Vikas" → customer_name = "Vikas"
+"I am Vikas Yadav" → customer_name = "Vikas Yadav"
+
+PHONE EXAMPLES:
+"My number is 9876543210" → customer_phone = "9876543210"
+"one two three four five six seven eight nine zero"
+→ customer_phone = "1234567890"
+
+IMPORTANT:
+Do not interpret phone-number digits as appointment time.
+Do not extract fields that were not requested.
 
 Customer message:
-
 {user_message}
 """
     )
 
     updates = {}
 
-    if result.customer_name:
+    # ---------------------------------------------------------
+    # CUSTOMER NAME
+    # ---------------------------------------------------------
+
+    if (
+        "customer_name" in missing_fields
+        and result.customer_name
+        and not state.get("customer_name")
+    ):
         updates["customer_name"] = result.customer_name
 
-    if result.customer_phone:
-        updates["customer_phone"] = result.customer_phone
+    # ---------------------------------------------------------
+    # CUSTOMER PHONE
+    # ---------------------------------------------------------
 
-    if result.service:
+    if (
+        "customer_phone" in missing_fields
+        and result.customer_phone
+        and not state.get("customer_phone")
+    ):
+        normalized_phone = normalize_phone(
+            result.customer_phone
+        )
+
+        if normalized_phone:
+            updates["customer_phone"] = normalized_phone
+
+    # ---------------------------------------------------------
+    # SERVICE
+    # ---------------------------------------------------------
+
+    if (
+        "service" in missing_fields
+        and result.service
+        and not state.get("service")
+    ):
         updates["service"] = result.service
 
-    if result.appointment_date:
-        updates["appointment_date"] = result.appointment_date
+    # ---------------------------------------------------------
+    # DATE
+    # ---------------------------------------------------------
 
-    if result.appointment_time:
-        updates["appointment_time"] = result.appointment_time
+    if (
+        "appointment_date" in missing_fields
+        and not state.get("appointment_date")
+    ):
+
+        # First try deterministic parsing from
+        # the actual customer message.
+        normalized_date = normalize_date(
+            user_message,
+            today=now.date(),
+        )
+
+        if normalized_date:
+            updates["appointment_date"] = normalized_date
+
+        elif result.appointment_date:
+
+            normalized_date = normalize_date(
+                result.appointment_date,
+                today=now.date(),
+            )
+
+            if normalized_date:
+                updates["appointment_date"] = normalized_date
+
+    # ---------------------------------------------------------
+    # TIME
+    # ---------------------------------------------------------
+
+    if (
+        "appointment_time" in missing_fields
+        and not state.get("appointment_time")
+    ):
+
+        normalized_time = normalize_time(
+            user_message
+        )
+
+        print("🕐 TIME DEBUG")
+        print("User message:", user_message)
+        print("Normalized time:", normalized_time)
+
+        if normalized_time:
+            updates["appointment_time"] = normalized_time
+
+        elif result.appointment_time:
+            normalized_time = normalize_time(
+                result.appointment_time
+            )
+
+            if normalized_time:
+                updates["appointment_time"] = normalized_time
+
+    # ---------------------------------------------------------
+    # DEBUG
+    # ---------------------------------------------------------
+
+    print("📦 EXTRACTION UPDATES:", updates)
 
     return updates
-
-
 
 
 # =========================================================
@@ -243,6 +406,7 @@ Customer message:
 
 
 def booking_node(state: AgentState):
+
     customer_name = state.get("customer_name", "")
     customer_phone = state.get("customer_phone", "")
     service = state.get("service", "")
@@ -266,6 +430,25 @@ def booking_node(state: AgentState):
             ],
             "booking_in_progress": True,
         }
+
+    # Normalize phone number
+    normalized_phone = normalize_phone(customer_phone)
+
+    if len(normalized_phone) != 10:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I didn't get the complete phone number. "
+                        "Could you please provide your 10-digit phone number?"
+                    )
+                )
+            ],
+            "booking_in_progress": True,
+        }
+
+    # Store normalized phone number in graph state
+    customer_phone = normalized_phone
 
     if not service:
         return {
@@ -295,10 +478,10 @@ def booking_node(state: AgentState):
             "booking_in_progress": True,
         }
 
-    is_available = check_availability(
-        appointment_date,
-        appointment_time,
-    )
+    is_available = check_availability.invoke({
+        "appointment_date": appointment_date,
+        "appointment_time": appointment_time,
+    })
 
     if not is_available:
         return {
@@ -325,6 +508,7 @@ def booking_node(state: AgentState):
                 )
             )
         ],
+        "customer_phone": customer_phone,
         "booking_in_progress": False,
         "awaiting_confirmation": True,
     }
@@ -408,14 +592,14 @@ Customer message:
 
 def confirm_booking_node(state: AgentState):
 
-    result = book_appointment(
-    session_id=state.get("session_id", ""),
-    customer_name=state.get("customer_name", "Customer"),
-    customer_phone=state.get("customer_phone"),
-    appointment_date=state["appointment_date"],
-    appointment_time=state["appointment_time"],
-    service=state.get("service"),
-    )
+    result = book_appointment.invoke({
+    "session_id": state.get("session_id", ""),
+    "customer_name": state.get("customer_name", "Customer"),
+    "customer_phone": state.get("customer_phone"),
+    "appointment_date": state["appointment_date"],
+    "appointment_time": state["appointment_time"],
+    "service": state.get("service"),
+    })
 
     if not result["success"]:
         return {
@@ -430,7 +614,7 @@ def confirm_booking_node(state: AgentState):
 
     return {
         "awaiting_confirmation": False,
-        "booking_confirmed": False,
+        "booking_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -587,11 +771,11 @@ def cancellation_node(state: AgentState):
             "cancellation_in_progress": True,
         }
 
-    appointment = find_appointment(
-        customer_phone=customer_phone,
-        appointment_date=appointment_date or None,
-        appointment_time=appointment_time or None,
-    )
+    appointment = find_appointment.invoke({
+    "customer_phone": customer_phone,
+    "appointment_date": appointment_date or None,
+    "appointment_time": appointment_time or None,
+    })
 
     if not appointment:
         return {
@@ -666,16 +850,17 @@ Customer message:
 
 
 def confirm_cancellation_node(state: AgentState):
+
     print("🔥🔥🔥 CONFIRM CANCELLATION NODE EXECUTED")
     customer_phone = state.get("customer_phone", "")
     appointment_date = state.get("appointment_date", "")
     appointment_time = state.get("appointment_time", "")
 
-    appointment = find_appointment(
-        customer_phone=customer_phone,
-        appointment_date=appointment_date or None,
-        appointment_time=appointment_time or None,
-    )
+    appointment=find_appointment.invoke({
+        "customer_phone":customer_phone,
+        "appointment_date":appointment_date,
+        "appointment_time":appointment_time
+    })
 
     if not appointment:
         return {
@@ -688,7 +873,9 @@ def confirm_cancellation_node(state: AgentState):
             ],
         }
 
-    result = cancel_appointment(appointment.id)
+    result = cancel_appointment.invoke({
+    "appointment_id": appointment.id
+     })
 
     if not result["success"]:
         return {
@@ -701,7 +888,7 @@ def confirm_cancellation_node(state: AgentState):
 
     return {
         "awaiting_cancellation_confirmation": False,
-        "cancellation_confirmed": False,
+        "cancellation_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -827,9 +1014,9 @@ def reschedule_node(state:AgentState):
             "reschedule_in_progress": True,
         }
     # 4. Find existing appointment
-    appointment = find_appointment(
-        customer_phone=customer_phone
-    )
+    appointment = find_appointment.invoke({
+        "customer_phone": customer_phone,
+    })
 
     if not appointment:
         return {
@@ -845,10 +1032,10 @@ def reschedule_node(state:AgentState):
         }
 
     # 5. Check whether new slot is available
-    is_available = check_availability(
-        new_date,
-        new_time
-    )
+    is_available = check_availability.invoke({
+        "appointment_date":new_date,
+        "appointment_time":new_time
+    })
     if not is_available:
         return {
             "messages": [
@@ -933,9 +1120,9 @@ def confirm_reschedule_node(state:AgentState):
     new_date = state.get("appointment_date", "")
     new_time = state.get("appointment_time", "")
 
-    appointment=find_appointment(
-        customer_phone=customer_phone
-    )
+    appointment = find_appointment.invoke({
+        "customer_phone": customer_phone,
+    })
     if not appointment:
         return {
             "awaiting_reschedule_confirmation": False,
@@ -947,11 +1134,11 @@ def confirm_reschedule_node(state:AgentState):
             ],
         }
 
-    result = reschedule_appointment(
-        appointment_id=appointment.id,
-        new_date=new_date,
-        new_time=new_time,
-    )
+    result = reschedule_appointment.invoke({
+        "appointment_id":appointment.id,
+        "new_date":new_date,
+        "new_time":new_time,
+    })
     
     if not result["success"]:
         return {
@@ -966,7 +1153,7 @@ def confirm_reschedule_node(state:AgentState):
 
     return {
         "awaiting_reschedule_confirmation": False,
-        "reschedule_confirmed": False,
+        "reschedule_confirmed": True,
         "messages": [
             AIMessage(
                 content=(
@@ -1106,73 +1293,7 @@ Customer message:
     return updates
 
 
-def lead_node(state: AgentState):
-    customer_name = state.get("customer_name", "")
-    customer_phone = state.get("customer_phone", "")
-    service = state.get("service", "")
-    preferred_time = state.get("preferred_time", "")
-    requirement = state.get("requirement", "")
 
-    print("🔥 LEAD NODE")
-    print("NAME:", customer_name)
-    print("PHONE:", customer_phone)
-    print("SERVICE:", service)
-    print("PREFERRED TIME:", preferred_time)
-    print("REQUIREMENT:", requirement)
-
-    if not customer_name:
-        return {
-            "messages": [
-                AIMessage(
-                    content="Sure. May I have your name?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not customer_phone:
-        return {
-            "messages": [
-                AIMessage(
-                    content="Thanks. What is the best phone number to reach you?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not service:
-        return {
-            "messages": [
-                AIMessage(
-                    content="What service are you interested in?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    if not preferred_time:
-        return {
-            "messages": [
-                AIMessage(
-                    content="When would you prefer to visit?"
-                )
-            ],
-            "lead_in_progress": True,
-        }
-
-    return {
-        "messages": [
-            AIMessage(
-                content=(
-                    f"Thanks, {customer_name}. I've noted your interest "
-                    f"in {service}. Our team will contact you at "
-                    f"{customer_phone} regarding your preferred time "
-                    f"of {preferred_time}."
-                )
-            )
-        ],
-        "lead_in_progress": False,
-    }
 
 
 def lead_node(state: AgentState):
@@ -1221,14 +1342,14 @@ def lead_node(state: AgentState):
         }
 
     # All required information collected
-    result = save_lead(
-        session_id=state["session_id"],
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        service=service,
-        preferred_time=preferred_time,
-        requirement=requirement,
-    )
+    result = save_lead.invoke({
+    "session_id": state["session_id"],
+    "customer_name": customer_name,
+    "customer_phone": customer_phone,
+    "service": service,
+    "preferred_time": preferred_time,
+    "requirement": requirement,
+    })
 
     if not result["success"]:
         return {
@@ -1255,3 +1376,36 @@ def lead_node(state: AgentState):
         "lead_saved": True,
     }
 
+
+def human_node(state:AgentState):
+    customer_name=state.get("customer_name","")
+    customer_phone=state.get("customer_phone","")
+
+    result=create_human_handoff.invoke({
+        "session_id":state["session_id"],
+        "customer_name":customer_name,
+        "customer_phone":customer_phone,
+        "reason": "Customer requested human assistance",
+    })
+    if not result["success"]:
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I'm sorry, I couldn't connect your request "
+                        "to our team right now. Please try again."
+                    )
+                )
+            ]
+        }
+
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "Sure. I've forwarded your request to our team. "
+                    "Someone will assist you shortly."
+                )
+            )
+        ]
+    }
