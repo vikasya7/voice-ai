@@ -134,7 +134,7 @@ async def voice_call(
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from fastapi import WebSocket,WebSocketDisconnect
 
-
+import re
 @app.post("/twilio/voice")
 async def twilio_voice():
 
@@ -192,6 +192,8 @@ async def media_stream(websocket: WebSocket):
     stream_sid = None
     session_id = None
     agent_speaking = False
+    outbound_greeting_sent = False
+    awaiting_outbound_confirmation = False
 
     try:
         while True:
@@ -231,6 +233,63 @@ async def media_stream(websocket: WebSocket):
                 session_id = stream_sid
 
                 print(f"🆔 Session ID: {session_id}")
+
+                # call type
+                custom_parameters=(
+                    message["start"]
+                    .get("customParameters",{})
+                )
+                call_type=custom_parameters.get(
+                    "call_type",
+                    "inbound"
+                )
+                print(f"📞 Call type: {call_type}")
+
+
+                if call_type == "outbound" and not outbound_greeting_sent:
+                    outbound_greeting_sent = True
+                    awaiting_outbound_confirmation = True
+
+                    greeting = (
+                       "Hi, this is the VIKAS  AI assistant. "
+                       "I'm calling to speak with you. "
+                       "Is this a good time to talk?"
+                   )
+
+                    print("📞 Sending outbound greeting")
+
+                    agent_speaking = True
+
+                    mp3_audio = text_to_speech(greeting)
+
+                    ulaw_audio = mp3_to_twilio_ulaw(mp3_audio)
+
+                    CHUNK_SIZE = 160
+
+                    for i in range(0, len(ulaw_audio), CHUNK_SIZE):
+
+                        chunk = ulaw_audio[i:i + CHUNK_SIZE]
+
+                        payload = base64.b64encode(chunk).decode("utf-8")
+
+                        await websocket.send_json({
+                          "event": "media",
+                          "streamSid": stream_sid,
+                          "media": {
+                            "payload": payload
+                           }
+                        })
+                        await asyncio.sleep(0.02)
+                        await websocket.send_json({
+                        "event": "mark",
+                        "streamSid": stream_sid,
+                        "mark": {
+                        "name": "agent_response"
+                        }
+                        })
+
+
+                    print("📞 Outbound greeting sent")
 
             # -----------------------------------
             # INCOMING AUDIO
@@ -344,46 +403,120 @@ async def media_stream(websocket: WebSocket):
                     # LANGGRAPH
                     # -----------------------------------
 
-                    try:
+                    # -----------------------------------
+                    # OUTBOUND CONFIRMATION / LANGGRAPH
+                    # -----------------------------------
+
+                    if awaiting_outbound_confirmation:
+
+                        normalized = re.sub(
+                             r"[^\w\s]",
+                              "",
+                              transcript.lower()
+                        ).strip()
 
                         print(
-                            "🧠 Sending transcript to agent..."
+                        f"📞 Outbound confirmation response: "
+                        f"{normalized}"
+                         )
+
+                         # -------------------------------
+                       # YES
+                         # -------------------------------
+
+                        if normalized in {
+                            "yes",
+                            "yeah",
+                            "yep",
+                            "sure",
+                             "okay",
+                            "ok",
+                            "of course",
+                             "yes please",
+                        }:
+
+                            awaiting_outbound_confirmation = False
+
+                            response_text = (
+            "Great, thank you. "
+            "How can I help you today?"
+                            )
+
+                         # -------------------------------
+                        # NO
+                         # -------------------------------
+
+                        elif normalized in {
+                            "no",
+        "nope",
+        "not now",
+        "busy",
+        "not a good time",
+                        }:
+
+                            awaiting_outbound_confirmation = False
+
+                            response_text = (
+            "No problem. I'll let you go. "
+            "Have a great day."
+                            )
+
+    # -------------------------------
+    # UNCLEAR
+    # -------------------------------
+
+                        else:
+
+                            response_text = (
+            "Sorry, I just wanted to check "
+            "whether this is a good time to talk. "
+            "Is now okay?"
                         )
 
-                        config = {
-                            "configurable": {
-                                "thread_id": session_id
-                            }
-                        }
+                    else:
 
-                        result = graph.invoke(
-                            {
-                                "messages": [
-                                    HumanMessage(
-                                        content=transcript
-                                    )
+    # -----------------------------------
+    # LANGGRAPH
+    # -----------------------------------
+
+                        try:
+
+                            print(
+            "🧠 Sending transcript to agent..."
+                            )
+
+                            config = {
+                               "configurable": {
+                               "thread_id": session_id
+                                }
+                            }
+
+                            result = graph.invoke(
+                               {
+                               "messages": [
+                                HumanMessage(
+                                   content=transcript
+                                )
                                 ],
                                 "session_id": session_id,
-                            },
-                            config=config,
-                        )
+                                },
+                                config=config,
+                            )
+                            response_text = (
+                                        result["messages"][-1].content
+                            )
+                            print(
+                                        f"🤖 Agent: {response_text}"
+                            )
+                        except Exception as e:
+                        
+                                print(
+                                    f"❌ Agent error: "
+                                    f"{type(e).__name__}: {e}"
+                                )
+                        
+                                continue
 
-                        response_text = (
-                            result["messages"][-1].content
-                        )
-
-                        print(
-                            f"🤖 Agent: {response_text}"
-                        )
-
-                    except Exception as e:
-
-                        print(
-                            f"❌ Agent error: "
-                            f"{type(e).__name__}: {e}"
-                        )
-
-                        continue
 
                     # -----------------------------------
                     # TTS
@@ -600,4 +733,53 @@ async def media_stream(websocket: WebSocket):
 
         print(
             "📞 Twilio Media Stream disconnected"
+        )
+
+import os
+from twilio.rest import Client
+from fastapi import HTTPException
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+NGROK_DOMAIN = os.getenv("NGROK_DOMAIN")
+
+twilio_client = Client(
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN
+)
+
+
+
+@app.post("/outbound-call")
+def outbound_call(phone_number:str):
+    try:
+        twiml = f"""
+<Response>
+    <Connect>
+        <Stream url="wss://{NGROK_DOMAIN}/media">
+            <Parameter name="call_type" value="outbound" />
+        </Stream>
+    </Connect>
+</Response>
+"""
+        call=twilio_client.calls.create(
+            to=phone_number,
+            from_=TWILIO_PHONE_NUMBER,
+            twiml=twiml
+        )
+        print("Outbound call started")
+        print("Call SID:",call.sid)
+        print("📱 To:", phone_number)
+
+
+        return {
+            "success":True,
+            "call_sid":call.sid,
+            "to":phone_number
+        }
+    except Exception as e:
+        print("❌ Outbound call failed:", e)
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
         )
