@@ -27,7 +27,7 @@ from app.agent.nodes import (
     confirm_reschedule_node,
     extract_lead_details
 )
-
+from app.agent.assistant import assistant_node
 
 graph_builder = StateGraph(AgentState)
 
@@ -75,6 +75,9 @@ graph_builder.add_node(
     "extract_lead_details",
     extract_lead_details
 )
+
+
+graph_builder.add_node("assistant", assistant_node)
 # -------------------------
 # START → INTENT
 # -------------------------
@@ -115,6 +118,7 @@ graph_builder.add_conditional_edges(
     route_start,
     {
         "intent": "intent",
+        "assistant":"assistant",
         "extract_appointment_details": "extract_appointment_details",
         "confirmation": "confirmation",
         "extract_cancellation_details": "extract_cancellation_details",
@@ -137,6 +141,7 @@ graph_builder.add_conditional_edges(
     route_intent,
     {
         "booking": "extract_appointment_details",
+        "assistant":"assistant",
         "cancel": "extract_cancellation_details",
         "reschedule": "extract_reschedule_details",
         "faq": "faq",

@@ -34,9 +34,50 @@ def root():
     }
 
 
+
+
+
+
+import re
+
+def split_response_and_sources(response_text: str):
+    # Extract URLs before cleaning the response.
+    urls = re.findall(r"https?://[^\s<>\])\",]+", response_text)
+    sources = list(dict.fromkeys(urls))
+
+    spoken_response = response_text
+
+    # Remove URLs from the spoken text.
+    spoken_response = re.sub(
+        r"https?://[^\s<>\])\",]+",
+        "",
+        spoken_response,
+    )
+
+    # Remove empty citation placeholders: (), ( and ), etc.
+    spoken_response = re.sub(
+        r"\(\s*(?:and\s*)*\)",
+        "",
+        spoken_response,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove Markdown heading and bullet formatting.
+    spoken_response = re.sub(r"(?m)^\s*#{1,6}\s*", "", spoken_response)
+    spoken_response = re.sub(r"(?m)^\s*[-*]\s+", "", spoken_response)
+
+    # Remove repeated whitespace and excess blank lines.
+    spoken_response = re.sub(r"[ \t]+", " ", spoken_response)
+    spoken_response = re.sub(r"\n{2,}", "\n", spoken_response)
+    spoken_response = spoken_response.strip()
+
+    return spoken_response, sources
+
+
+
+
 @app.post("/call")
 def handle_call(request: CallRequest):
-
     config = {
         "configurable": {
             "thread_id": request.session_id
@@ -53,10 +94,18 @@ def handle_call(request: CallRequest):
         config=config,
     )
 
-    response_text = result["messages"][-1].content
+    response_text = result.get(
+    "assistant_response",
+    result["messages"][-1].content,
+)
+    spoken_response = result.get(
+    "spoken_response",
+    response_text,
+    )
+    sources = result.get("sources", [])
     intent = result.get("intent")
 
-    # Logging should never break the customer's request
+    # Logging should never break the customer's request.
     try:
         log_conversation.invoke({
             "session_id": request.session_id,
@@ -69,8 +118,11 @@ def handle_call(request: CallRequest):
 
     return {
         "intent": intent,
-        "response": response_text,
+        "response": spoken_response,
+        "spoken_response": spoken_response,
+        "sources": sources,
     }
+
 
 @app.post("/voice")
 async def voice_call(
@@ -175,6 +227,43 @@ from app.voice.audio import (
     mp3_to_twilio_ulaw,
     ulaw_to_base64,
 )
+
+
+
+
+async def send_agent_audio(websocket, stream_sid, ulaw_audio):
+    chunk_size = 160
+
+    try:
+        print("📤 Sending agent audio...")
+
+        for i in range(0, len(ulaw_audio), chunk_size):
+            chunk = ulaw_audio[i:i + chunk_size]
+            payload = ulaw_to_base64(chunk)
+
+            await websocket.send_json({
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {
+                    "payload": payload
+                }
+            })
+
+            await asyncio.sleep(0.02)
+
+        await websocket.send_json({
+            "event": "mark",
+            "streamSid": stream_sid,
+            "mark": {
+                "name": "agent_response"
+            }
+        })
+
+        print("✅ Agent audio sent; waiting for playback mark")
+
+    except Exception as e:
+        print(f"❌ Audio sending failed: {type(e).__name__}: {e}")
+
 import asyncio
 @app.websocket("/media")
 async def media_stream(websocket: WebSocket):
@@ -264,29 +353,13 @@ async def media_stream(websocket: WebSocket):
 
                     ulaw_audio = mp3_to_twilio_ulaw(mp3_audio)
 
-                    CHUNK_SIZE = 160
-
-                    for i in range(0, len(ulaw_audio), CHUNK_SIZE):
-
-                        chunk = ulaw_audio[i:i + CHUNK_SIZE]
-
-                        payload = base64.b64encode(chunk).decode("utf-8")
-
-                        await websocket.send_json({
-                          "event": "media",
-                          "streamSid": stream_sid,
-                          "media": {
-                            "payload": payload
-                           }
-                        })
-                        await asyncio.sleep(0.02)
-                        await websocket.send_json({
-                        "event": "mark",
-                        "streamSid": stream_sid,
-                        "mark": {
-                        "name": "agent_response"
-                        }
-                        })
+                    asyncio.create_task(
+                    send_agent_audio(
+                     websocket,
+                     stream_sid,
+                     ulaw_audio
+                   )
+                    )
 
 
                     print("📞 Outbound greeting sent")
@@ -406,7 +479,7 @@ async def media_stream(websocket: WebSocket):
                     # -----------------------------------
                     # OUTBOUND CONFIRMATION / LANGGRAPH
                     # -----------------------------------
-
+                    spoken_text = None
                     if awaiting_outbound_confirmation:
 
                         normalized = re.sub(
@@ -441,6 +514,7 @@ async def media_stream(websocket: WebSocket):
             "Great, thank you. "
             "How can I help you today?"
                             )
+                            spoken_text=response_text
 
                          # -------------------------------
                         # NO
@@ -460,6 +534,7 @@ async def media_stream(websocket: WebSocket):
             "No problem. I'll let you go. "
             "Have a great day."
                             )
+                            spoken_text=response_text
 
     # -------------------------------
     # UNCLEAR
@@ -472,6 +547,7 @@ async def media_stream(websocket: WebSocket):
             "whether this is a good time to talk. "
             "Is now okay?"
                         )
+                            spoken_text=response_text
 
                     else:
 
@@ -505,8 +581,12 @@ async def media_stream(websocket: WebSocket):
                             response_text = (
                                         result["messages"][-1].content
                             )
+                            spoken_text=result.get("spoken_response") or response_text
                             print(
                                         f"🤖 Agent: {response_text}"
+                            )
+                            print(
+                                f"🤖 Agent: {spoken_text}"
                             )
                         except Exception as e:
                         
@@ -529,7 +609,7 @@ async def media_stream(websocket: WebSocket):
                         agent_speaking = True
 
                         mp3_audio = text_to_speech(
-                            response_text
+                            spoken_text or response_text
                         )
 
                         print(
@@ -578,98 +658,27 @@ async def media_stream(websocket: WebSocket):
                     # SEND AUDIO TO TWILIO
                     # -----------------------------------
 
-                    try:
+                    
+                    agent_speaking = True
 
-                        CHUNK_SIZE = 160
+                    asyncio.create_task(
+                      send_agent_audio(
+                      websocket,
+                        stream_sid,
+                      ulaw_audio
+                      )
+                    )
 
-                        print(
-                            "📤 Sending agent audio..."
-                        )
 
-                        for i in range(
-                            0,
-                            len(ulaw_audio),
-                            CHUNK_SIZE
-                        ):
+                        
 
-                            chunk = ulaw_audio[
-                                i:i + CHUNK_SIZE
-                            ]
-
-                            payload = ulaw_to_base64(
-                                chunk
-                            )
-
-                            await websocket.send_json(
-                                {
-                                    "event": "media",
-                                    "streamSid": stream_sid,
-                                    "media": {
-                                        "payload": payload
-                                    },
-                                }
-                            )
-
-                            # 160 bytes of 8kHz μ-law
-                            # = 20 milliseconds.
-                            await asyncio.sleep(0.02)
-
-                        print(
-                            "📞 Agent audio sent to Twilio"
-                        )
-
-                    except WebSocketDisconnect as e:
-
-                        print(
-                            f"❌ WebSocket disconnected "
-                            f"while sending audio: "
-                            f"code={e.code}"
-                        )
-
-                        break
-
-                    except Exception as e:
-
-                        print(
-                            f"❌ Audio send error: "
-                            f"{type(e).__name__}: {e}"
-                        )
-
-                        break
+                    
 
                     # -----------------------------------
                     # MARK
                     # -----------------------------------
 
-                    try:
-
-                        print(
-                            "📍 Sending playback mark..."
-                        )
-
-                        await websocket.send_json(
-                            {
-                                "event": "mark",
-                                "streamSid": stream_sid,
-                                "mark": {
-                                    "name": "agent_response"
-                                },
-                            }
-                        )
-
-                        print(
-                            "⏳ Waiting for Twilio "
-                            "playback to finish..."
-                        )
-
-                    except Exception as e:
-
-                        print(
-                            f"❌ Mark send error: "
-                            f"{type(e).__name__}: {e}"
-                        )
-
-                        break
+                    
 
             # -----------------------------------
             # TWILIO MARK
