@@ -38,6 +38,7 @@ llm = ChatOpenAI(
 class IntentResult(BaseModel):
     intent: Literal[
         "booking",
+        "assistant",
         "cancel",
         "reschedule",
         "faq",
@@ -89,8 +90,7 @@ Examples:
 - "I don't want my appointment anymore"
 - "Can you cancel my booking?"
 
-faq:
-The customer is asking a general question about the business.
+
 
 Examples:
 - "What time do you open?"
@@ -112,6 +112,23 @@ Examples:
 - "Can I talk to someone?"
 - "Connect me to an employee"
 
+
+assistant:
+The customer is asking for general-purpose assistance that is
+not related to the receptionist's business workflows. This includes
+calculations, web searches, general knowledge questions, and requests
+that require using available tools.
+"Classify general knowledge questions, calculations, web searches, "
+"current events, and requests for the latest information as 'assistant'. "
+"Use 'faq' only for questions about the business's services, policies, "
+"hours, pricing, and other business-specific information."
+
+Examples:
+- "What is 144 divided by 12?"
+- "Search the web for the latest AI news."
+- "Explain what an API is."
+- "Calculate 25 multiplied by 16."
+
 other:
 Anything that does not fit the categories above.
 
@@ -123,6 +140,9 @@ Examples:
 "I need to change my appointment"
 "Can I move my appointment to tomorrow?"
 "I want to change my appointment time"
+
+faq:
+The customer is asking a general question about the business.
 
 IMPORTANT:
 If the customer says "cancel", "cancel my appointment",
