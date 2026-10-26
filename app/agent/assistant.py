@@ -68,10 +68,10 @@ assistant_agent = create_agent(
 
 
 def assistant_node(state):
-    user_message = state["messages"][-1]
+    
 
     result = assistant_agent.invoke({
-        "messages": [user_message]
+        "messages": state['messages']
     })
 
     # Log actual tool calls and results.
@@ -133,7 +133,7 @@ def assistant_node(state):
             ),
             (
                 "human",
-                f"User question: {user_message.content}\n\n"
+                f"User question: {state['messages'][-1].content}\n\n"
                 f"Written answer: {written_answer}\n\n"
                 f"Source URLs returned by tools: {sources}"
             ),
