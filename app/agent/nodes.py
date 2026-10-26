@@ -60,103 +60,57 @@ cancellation_details_llm = llm.with_structured_output(
     CancellationDetails
 )
 
+
 def intent_node(state: AgentState):
     user_message = state["messages"][-1].content
+
+    # Include recent conversation context
+    conversation = "\n".join(
+        f"{'Customer' if msg.type == 'human' else 'Assistant'}: {msg.content}"
+        for msg in state["messages"][-6:]
+    )
 
     result = intent_llm.invoke(
         f"""
 You are an intent classifier for a business receptionist.
 
-Classify the customer's message into exactly ONE category.
+Classify the customer's LATEST message into exactly ONE category.
 
 Categories:
+- booking: Creating a new appointment.
+- cancel: Cancelling an existing appointment.
+- reschedule: Changing an existing appointment.
+- faq: Asking about the business's services, policies, hours, or pricing.
+- lead: Expressing interest in the business or its services.
+- human: Asking to speak to a human.
+- assistant: General knowledge, calculations, web searches, or
+  other general-purpose assistance.
+- other: Anything that does not fit the categories above.
 
-booking:
-The customer wants to create or make a NEW appointment.
+Important rules:
+1. Use the conversation history to understand short replies.
+2. If the customer is answering the assistant's previous question,
+   classify based on the ongoing conversation.
+3. "To gain weight" after a question about calorie goals is
+   a continuation of the general assistance conversation: assistant.
+4. Never classify a cancellation request as lead.
+5. Questions about business services, pricing, and hours are faq.
+6. Classify only the latest customer message, not the assistant's message.
 
-Examples:
-- "I want to book an appointment"
-- "Can I schedule a haircut?"
-- "I need an appointment tomorrow"
+Recent conversation:
+{conversation}
 
-cancel:
-The customer wants to CANCEL an EXISTING appointment.
-
-Examples:
-- "I want to cancel my appointment"
-- "Cancel my booking"
-- "I need to cancel my appointment"
-- "Please cancel my appointment"
-- "I don't want my appointment anymore"
-- "Can you cancel my booking?"
-
-
-
-Examples:
-- "What time do you open?"
-- "How much does a haircut cost?"
-- "Where are you located?"
-
-lead:
-The customer is interested in the business but is NOT asking to book
-or cancel an appointment.
-
-Examples:
-- "I'm interested in your services"
-- "Tell me more about your business"
-
-human:
-The customer wants to speak to a human.
-
-Examples:
-- "Can I talk to someone?"
-- "Connect me to an employee"
-
-
-assistant:
-The customer is asking for general-purpose assistance that is
-not related to the receptionist's business workflows. This includes
-calculations, web searches, general knowledge questions, and requests
-that require using available tools.
-"Classify general knowledge questions, calculations, web searches, "
-"current events, and requests for the latest information as 'assistant'. "
-"Use 'faq' only for questions about the business's services, policies, "
-"hours, pricing, and other business-specific information."
-
-Examples:
-- "What is 144 divided by 12?"
-- "Search the web for the latest AI news."
-- "Explain what an API is."
-- "Calculate 25 multiplied by 16."
-
-other:
-Anything that does not fit the categories above.
-
-Classify as "reschedule" when the customer wants
-to change an existing appointment.
-
-Examples:
-"I want to reschedule my appointment"
-"I need to change my appointment"
-"Can I move my appointment to tomorrow?"
-"I want to change my appointment time"
-
-faq:
-The customer is asking a general question about the business.
-
-IMPORTANT:
-If the customer says "cancel", "cancel my appointment",
-"cancel my booking", or similar language about cancelling
-an existing appointment, ALWAYS classify it as "cancel", NOT "lead".
-
-Customer message:
+Latest customer message:
 {user_message}
 """
     )
 
+    print("🎯 CLASSIFIED INTENT:", result.intent)
+
     return {
         "intent": result.intent
     }
+
 
 
 # =========================================================

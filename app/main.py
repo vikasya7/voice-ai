@@ -264,6 +264,17 @@ async def send_agent_audio(websocket, stream_sid, ulaw_audio):
     except Exception as e:
         print(f"❌ Audio sending failed: {type(e).__name__}: {e}")
 
+
+# for reference
+#Event	Meaning
+#connected	Twilio's WebSocket connection is established
+#start	The audio stream has started
+#media	A chunk of audio has arrived
+#mark	A previously marked audio playback point has been reached
+#stop	The audio stream has stopped
+
+
+
 import asyncio
 @app.websocket("/media")
 async def media_stream(websocket: WebSocket):
@@ -276,7 +287,7 @@ async def media_stream(websocket: WebSocket):
 
     SILENCE_THRESHOLD = 1000
     SILENCE_CHUNKS_REQUIRED = 40
-    MIN_AUDIO_BYTES = 40000
+    MIN_AUDIO_BYTES = 4000
 
     stream_sid = None
     session_id = None
@@ -348,18 +359,24 @@ async def media_stream(websocket: WebSocket):
                     print("📞 Sending outbound greeting")
 
                     agent_speaking = True
+                    print("1️⃣ Before text_to_speech")
 
                     mp3_audio = text_to_speech(greeting)
+                    print(f"2️⃣ TTS completed. Audio size: {len(mp3_audio)} bytes")
+                    print("3️⃣ Before audio conversion")
 
                     ulaw_audio = mp3_to_twilio_ulaw(mp3_audio)
+                    print(f"4️⃣ Conversion completed. Audio size: {len(ulaw_audio)} bytes")
+                    print("5️⃣ Before creating audio task")
 
-                    asyncio.create_task(
-                    send_agent_audio(
-                     websocket,
-                     stream_sid,
-                     ulaw_audio
-                   )
+                    audio_task = asyncio.create_task(
+                       send_agent_audio(
+                           websocket,
+                           stream_sid,
+                           ulaw_audio
+                        )
                     )
+                    print("6️⃣ Audio task created")
 
 
                     print("📞 Outbound greeting sent")
@@ -369,80 +386,76 @@ async def media_stream(websocket: WebSocket):
             # -----------------------------------
             elif event == "media":
 
-                # Don't process caller audio while
-                # agent audio is playing.
-                if agent_speaking:
-                    continue
-
                 payload = message["media"]["payload"]
-
-                # Twilio μ-law → PCM
                 pcm_audio = twilio_ulaw_to_pcm(payload)
 
+
                 speaking = is_speech(
-                    pcm_audio,
-                    SILENCE_THRESHOLD
+                  pcm_audio,
+                  SILENCE_THRESHOLD
                 )
 
-                # -----------------------------------
-                # CALLER IS SPEAKING
-                # -----------------------------------
+                # Handle caller speech
                 if speaking:
+                     # Interrupt agent audio only when a new utterance starts
+                    if agent_speaking and not speech_detected:
+                        print("🛑 Caller interrupted agent")
+
+                        if audio_task and not audio_task.done():
+
+                            audio_task.cancel()
+
+                            try:
+                                  await audio_task
+                            except asyncio.CancelledError:
+                                 pass
+
+                        await websocket.send_json({
+                                "event": "clear",
+                                "streamSid": stream_sid
+                        })
+
+                        agent_speaking = False
+                        audio_buffer = bytearray()
+                        silence_chunks = 0
 
                     if not speech_detected:
                         print("🎤 Caller started speaking")
-
-                    speech_detected = True
-
+                    speech_detected=True
                     audio_buffer.extend(pcm_audio)
+                    silence_chunks=0
 
-                    silence_chunks = 0
-
-                # -----------------------------------
-                # SILENCE
-                # -----------------------------------
+                    # Caller is silent
                 else:
-
+                       
                     if not speech_detected:
                         continue
 
                     silence_chunks += 1
-
-                    # Keep the silence at the end of
-                    # the caller's sentence.
                     audio_buffer.extend(pcm_audio)
 
-                # -----------------------------------
-                # CALLER FINISHED SPEAKING
-                # -----------------------------------
                 if (
-                    speech_detected
-                    and silence_chunks >= SILENCE_CHUNKS_REQUIRED
-                    and len(audio_buffer) >= MIN_AUDIO_BYTES
+                        speech_detected
+                         and silence_chunks >= SILENCE_CHUNKS_REQUIRED
+                         and len(audio_buffer) >= MIN_AUDIO_BYTES
                 ):
-
+                        
                     print("🤫 Caller stopped speaking")
-
-                    print(
-                        f"🎵 Audio size: "
-                        f"{len(audio_buffer)} bytes"
-                    )
-
-                    # -----------------------------------
-                    # COPY AUDIO AND RESET BUFFER
-                    # -----------------------------------
+                    print(f"🎵 Audio size: {len(audio_buffer)} bytes")
 
                     current_audio = bytes(audio_buffer)
-
                     audio_buffer = bytearray()
                     silence_chunks = 0
                     speech_detected = False
+
 
                     # -----------------------------------
                     # PCM → WAV
                     # -----------------------------------
 
                     wav_audio = pcm_to_wav(current_audio)
+                    print("🎵 PCM audio bytes:", len(current_audio))
+                    print("🎵 WAV audio bytes:", len(wav_audio))
 
                     # -----------------------------------
                     # SPEECH TO TEXT
@@ -575,13 +588,27 @@ async def media_stream(websocket: WebSocket):
                                 )
                                 ],
                                 "session_id": session_id,
+
+                                "assistant_response": None,
+                                "spoken_response": None,
+                                "sources": [],
                                 },
+
                                 config=config,
                             )
-                            response_text = (
-                                        result["messages"][-1].content
-                            )
-                            spoken_text=result.get("spoken_response") or response_text
+                            response_text = result.get("assistant_response",result["messages"][-1].content)
+                            spoken_text=result.get("spoken_response",response_text)
+
+
+
+                            print("📝 CURRENT TRANSCRIPT:", repr(transcript))
+                            print("💬 LAST GRAPH MESSAGE:", repr(result["messages"][-1].content))
+                            print("🤖 ASSISTANT RESPONSE:", repr(result.get("assistant_response")))
+                            print("🔊 SPOKEN RESPONSE:", repr(result.get("spoken_response")))
+
+                            
+
+                            
                             print(
                                         f"🤖 Agent: {response_text}"
                             )
@@ -661,19 +688,13 @@ async def media_stream(websocket: WebSocket):
                     
                     agent_speaking = True
 
-                    asyncio.create_task(
-                      send_agent_audio(
-                      websocket,
-                        stream_sid,
-                      ulaw_audio
-                      )
+                    audio_task = asyncio.create_task(
+                        send_agent_audio(
+                            websocket,
+                            stream_sid,
+                            ulaw_audio
+                        )
                     )
-
-
-                        
-
-                    
-
                     # -----------------------------------
                     # MARK
                     # -----------------------------------
