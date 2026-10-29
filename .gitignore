@@ -55,3 +55,5 @@ test_audio.wav
 .gitignore
 checkpoints.db-shm
 checkpoints.db-shm
+credentials.json
+token.json
