@@ -1,6 +1,6 @@
 from app.agent.graph import graph
 from langchain_core.messages import HumanMessage
-
+import uuid
 
 def run_message(session_id: str, message: str):
     config = {
@@ -26,12 +26,12 @@ def run_message(session_id: str, message: str):
 
 
 def test_booking_flow():
-    session_id = "test_booking_005"
+    session_id = f"test_booking_{uuid.uuid4().hex[:8]}"
 
     # 1. Start booking
     result = run_message(
         session_id,
-        "I want to book an appointment tomorrow at 5 am"
+        "I want to book an appointment tomorrow at 6 pm"
     )
 
     assert result["intent"] == "booking"
