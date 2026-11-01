@@ -13,6 +13,7 @@ class AgentState(TypedDict):
     intent: str
     customer_name: str
     customer_phone:str
+    customer_email: str | None
     service:str
     appointment_date: str
     appointment_time: str
@@ -32,12 +33,14 @@ class AgentState(TypedDict):
     assistant_response: str
     spoken_response: str
     sources: list[str]
+    awaiting_new_time: bool
     
 
 
 class AppointmentDetails(BaseModel):
     customer_name: str | None = None
     customer_phone: str | None = None 
+    customer_email: str | None
     service: str | None = None
     appointment_date: str | None = None
     appointment_time: str | None = None

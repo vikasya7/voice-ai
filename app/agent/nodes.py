@@ -174,8 +174,11 @@ def extract_appointment_details(state: AgentState):
     if not state.get("appointment_date"):
         missing_fields.append("appointment_date")
 
-    if not state.get("appointment_time"):
+    if (not state.get("appointment_time") or state.get("awaiting_new_time",False)):
         missing_fields.append("appointment_time")
+
+    if not state.get("customer_email"):
+        missing_fields.append("customer_email")
 
     print("🔎 Missing appointment fields:", missing_fields)
 
@@ -205,6 +208,12 @@ ONLY extract these missing fields:
 {fields_text}
 
 If a value is not provided, return null.
+
+EMAIL RULES:
+- Extract the customer's email address if provided.
+- Preserve the exact email address.
+- Do not guess or invent an email address.
+- If no email is provided, return null.
 
 IMPORTANT:
 Do NOT invent information.
@@ -295,6 +304,21 @@ Customer message:
         if normalized_phone:
             updates["customer_phone"] = normalized_phone
 
+
+    # ---------------------------------------------------------
+# CUSTOMER EMAIL
+# ---------------------------------------------------------
+
+    if (
+        "customer_email" in missing_fields
+        and result.customer_email
+        and not state.get("customer_email")
+    ):
+        email = result.customer_email.strip()
+
+        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            updates["customer_email"] = email
+
     # ---------------------------------------------------------
     # SERVICE
     # ---------------------------------------------------------
@@ -341,7 +365,6 @@ Customer message:
 
     if (
         "appointment_time" in missing_fields
-        and not state.get("appointment_time")
     ):
 
         normalized_time = normalize_time(
@@ -354,6 +377,7 @@ Customer message:
 
         if normalized_time:
             updates["appointment_time"] = normalized_time
+            updates["awaiting_new_time"] = False
 
         elif result.appointment_time:
             normalized_time = normalize_time(
@@ -362,6 +386,7 @@ Customer message:
 
             if normalized_time:
                 updates["appointment_time"] = normalized_time
+                updates["awaiting_new_time"] = False
 
     # ---------------------------------------------------------
     # DEBUG
@@ -442,6 +467,17 @@ def booking_node(state: AgentState):
             "booking_in_progress": True,
         }
 
+    if not state.get("customer_email"):
+        return {
+        "messages": [
+            AIMessage(
+                content="Could you please provide your email address "
+                        "so I can send your booking confirmation?"
+            )
+        ],
+        "booking_in_progress": True,
+        }
+
     if not appointment_time:
         return {
             "messages": [
@@ -469,6 +505,8 @@ def booking_node(state: AgentState):
                 )
             ],
             "booking_in_progress": True,
+            "awaiting_new_time":True,
+            "awaiting_confirmation": False,
         }
 
     return {
@@ -563,44 +601,156 @@ Customer message:
 # ACTUAL BOOKING
 # =========================================================
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from app.services.calendar_service import (
+    book_calendar_event,
+    delete_calendar_event
+)
+from app.agent.tools import (
+    confirm_appointment,
+    mark_appointment_failed
+)
+from app.services.email_service import send_booking_confirmation
+
 
 def confirm_booking_node(state: AgentState):
 
     result = book_appointment.invoke({
-    "session_id": state.get("session_id", ""),
-    "customer_name": state.get("customer_name", "Customer"),
-    "customer_phone": state.get("customer_phone"),
-    "appointment_date": state["appointment_date"],
-    "appointment_time": state["appointment_time"],
-    "service": state.get("service"),
+      "session_id":state.get("session_id",""),
+      "customer_name":state.get("customer_name","Customer"),
+      "customer_phone":state.get("customer_phone"),
+      "customer_email":state.get("customer_email"),
+      "appointment_date":state["appointment_date"],
+      "appointment_time":state["appointment_time"],
+      "service":state["service"],
+      "duration_minutes":30
     })
 
     if not result["success"]:
+        return {
+            "awaiting_confirmation":False,
+            "booking_confirmed":False,
+            "messages":[
+                AIMessage(content=result["message"])
+            ],
+        }
+
+    appointment_id=result["appointment_id"]
+    calendar_event_id=None
+
+    try:
+        # 2 contruct timezone-aware start and end
+        timezone=ZoneInfo("Asia/Kolkata")
+        start=datetime.strptime(
+            f"{state['appointment_date']} {state['appointment_time']}",
+            "%Y-%m-%d %H:%M",
+        ).replace(tzinfo=timezone)
+
+
+        end=start + timedelta(minutes=30)
+
+        #3 Create google calendar event 
+        calendar_result=book_calendar_event(
+            customer_name=state.get("customer_name","Customer"),
+            service_name=state.get("service") or "Appointment",
+            start=start,
+            end=end,
+            customer_phone=state.get("customer_phone") or "",
+            customer_email=state.get("customer_email")
+        )
+
+        if not calendar_result["success"]:
+            mark_appointment_failed(appointment_id)
+
+            return {
+                "awaiting_confirmation":False,
+                "booking_confirmed":False,
+                "messages":[
+                    AIMessage(
+                        content="Sorry, that time slot is unavailable in our calendar. Please choose another time."
+                    )
+                ]
+            }
+
+        calendar_event_id=calendar_result["event_id"]
+
+        #4 Confirm appointment in postgresql
+        confirmed=confirm_appointment(
+            appointment_id,
+            calendar_event_id
+        )
+
+        if not confirmed:
+            raise RuntimeError(
+                "Could not confirm appointment in database"
+            )
+
+        # Send confirmation email only if customer provided an email
+
+        email_sent=False
+        customer_email = state.get("customer_email")
+
+        if customer_email:
+            try:
+                email_result=send_booking_confirmation(
+                    customer_name=state.get("customer_name", "Customer"),
+                    to_email=customer_email,
+                    service_name=state.get("service") or "Appointment",
+                    appointment_start=(
+                       f"{state.get('appointment_date')} "
+                       f"at {state.get('appointment_time')}"
+                    ),
+                )
+
+                email_sent = email_result.get("success", False)
+                print("Booking confirmation email sent:", email_result)
+            except Exception as email_error:
+                print("Booking email failed:", email_error)
+
+
+        return {
+            "awaiting_confirmation":False,
+            "booking_confirmed":True,
+            "messages":[
+                AIMessage(
+                    content=(
+                        f"Your appointment is confirmed for "
+                        f"{state['appointment_date']} at "
+                        f"{state['appointment_time']}. "
+                        f"Your appointment ID is {appointment_id}."
+                    )
+                )
+            ]
+        }
+    except Exception as exc:
+        print(f"Booking integration error: {exc}")
+
+
+        # 5 clean calendar event if it was created
+
+        if calendar_event_id:
+            try:
+                delete_calendar_event(calendar_event_id)
+            except Exception as cleanup_error:
+                print(f"Calendar cleanup failed: {cleanup_error}")
+
+        mark_appointment_failed(appointment_id)
+
         return {
             "awaiting_confirmation": False,
             "booking_confirmed": False,
             "messages": [
                 AIMessage(
-                    content=result["message"]
+                    content=(
+                        "Sorry, we couldn't complete your booking "
+                        "because of a technical issue. Please try again."
+                    )
                 )
-            ]
+            ],
         }
-
-    return {
-        "awaiting_confirmation": False,
-        "booking_confirmed": True,
-        "messages": [
-            AIMessage(
-                content=(
-                    f"Your appointment is confirmed "
-                    f"for {state['appointment_date']} "
-                    f"at {state['appointment_time']}. "
-                    f"Your appointment ID is "
-                    f"{result['appointment_id']}."
-                )
-            )
-        ]
-    }
+        
 
 
 

@@ -85,7 +85,7 @@ def book_calendar_event(
         "description":(
             f"Customer:{customer_name}\n",
             f"Phone: {customer_phone}\n",
-            f"Email:{customer_email} or 'Not provided'",
+            f"Email: {customer_email or 'Not provided'}\n"
             f"Service: {service_name}"
         ),
         "start":{
@@ -117,4 +117,27 @@ def book_calendar_event(
     except HttpError as exc:
         raise RuntimeError(
             f"Google Calendar event creation failed: {exc}"
+        ) from exc
+
+
+
+def delete_calendar_event(
+    event_id: str,
+    calendar_id: str = "primary",
+) -> bool:
+    """Delete a previously created calendar event."""
+
+    service = get_calendar_service()
+
+    try:
+        service.events().delete(
+            calendarId=calendar_id,
+            eventId=event_id,
+        ).execute()
+
+        return True
+
+    except HttpError as exc:
+        raise RuntimeError(
+            f"Google Calendar event deletion failed: {exc}"
         ) from exc
