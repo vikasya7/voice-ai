@@ -4,8 +4,8 @@ from zoneinfo import ZoneInfo
 import os
 
 from google_auth import get_calendar_service, get_gmail_service
-from calendar_service import check_availability
-from email_service import send_email
+from app.services.calendar_service import check_availability
+from app.services.email_service import send_email
 
 TZ = ZoneInfo("Asia/Kolkata")
 

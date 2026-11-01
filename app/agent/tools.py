@@ -39,12 +39,14 @@ def check_availability(
 
 @tool
 def book_appointment(
-    session_id:str,
-    customer_name:str,
-    appointment_date:str,
-    appointment_time:str,
-    customer_phone:str |None=None,
-    service:str | None=None
+    session_id: str,
+    customer_name: str,
+    appointment_date: str,
+    appointment_time: str,
+    customer_phone: str | None = None,
+    service: str | None = None,
+    customer_email: str | None = None,
+    duration_minutes: int = 30,
 ):
     """
     Create a new appointment in the database after
@@ -73,14 +75,16 @@ def book_appointment(
                 "success":False,
                 "message":"This appointment slot is no longer available"
             }
-        appointment=Appointment(
-            session_id=session_id,
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            appointment_date=appointment_date,
-            appointment_time=appointment_time,
-            service=service,
-            status="confirmed"
+        appointment = Appointment(
+        session_id=session_id,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        customer_email=customer_email,
+        appointment_date=appointment_date,
+        appointment_time=appointment_time,
+        service=service,
+        duration_minutes=duration_minutes,
+        status="pending",
         )
         # for race condition if two persons try to book at same time
         db.add(appointment)
@@ -473,3 +477,55 @@ def log_conversation(
 
     finally:
         db.close()
+
+
+def confirm_appointment(
+    appointment_id:int,
+    calendar_event_id:str,
+)->bool:
+    db=SessionLocal()
+
+
+    try:
+        appointment=db.get(Appointment,appointment_id)
+
+        if not appointment or appointment.status!="pending":
+            return False
+        appointment.calendar_event_id=calendar_event_id
+        appointment.status="confirmed"
+
+        db.commit()
+        return True
+
+    except IntegrityError:
+        # race condition 
+        #When Customer B tries to get confirmed, 
+        # PostgreSQL detects the duplicate and raises an IntegrityError.
+        db.rollback()
+        return False
+
+    except Exception:
+        db.rollback()
+        raise
+
+    finally:
+        db.close()
+
+
+def mark_appointment_failed(appointment_id:int):
+    db=SessionLocal()
+
+    try:
+        appointment=db.get(Appointment,appointment_id)
+
+        if appointment and appointment.status=="pending":
+            appointment.status="failed"
+            db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
