@@ -4,7 +4,7 @@ from sqlalchemy import String, DateTime,Text,Index,text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import UniqueConstraint
 from app.database.database import Base
-
+from sqlalchemy import Integer
 
 class Appointment(Base):
     __tablename__ = "appointment"
@@ -57,6 +57,17 @@ class Appointment(Base):
     status: Mapped[str] = mapped_column(
         String(30),
         default="confirmed"
+    )
+
+    customer_email:Mapped[str | None]=mapped_column(
+        String(255),nullable=True
+    )
+    calendar_event_id: Mapped[str | None] = mapped_column(
+    String(255), nullable=True
+    )
+
+    duration_minutes: Mapped[int] = mapped_column(
+    Integer, default=30, server_default=text("30"),nullable=False
     )
 
     created_at: Mapped[datetime] = mapped_column(
