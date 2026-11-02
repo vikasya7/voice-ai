@@ -34,6 +34,8 @@ class AgentState(TypedDict):
     spoken_response: str
     sources: list[str]
     awaiting_new_time: bool
+    cancellation_date: str
+    cancellation_time: str
     
 
 
@@ -44,6 +46,7 @@ class AppointmentDetails(BaseModel):
     service: str | None = None
     appointment_date: str | None = None
     appointment_time: str | None = None
+    
 
 
 class RescheduleDetails(BaseModel):
