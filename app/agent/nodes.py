@@ -11,6 +11,7 @@ from app.agent.tools import (
     check_availability,
     book_appointment,
     find_appointment,
+    find_appointments,
     cancel_appointment,
     reschedule_appointment,
     save_lead,
@@ -107,9 +108,15 @@ Latest customer message:
 
     print("🎯 CLASSIFIED INTENT:", result.intent)
 
-    return {
-        "intent": result.intent
+    updates = {
+    "intent": result.intent
     }
+
+    if result.intent == "cancel":
+        updates["cancellation_date"] = ""
+        updates["cancellation_time"] = ""
+
+    return updates
 
 
 
@@ -845,22 +852,35 @@ def route_intent(
     return state["intent"]
 
 
-
+from app.voice.normalization import normalize_time
 def extract_cancellation_details(state: AgentState):
+
     print("🔥 EXTRACT CANCELLATION DETAILS")
 
     user_message = state["messages"][-1].content
 
+    
     result = cancellation_details_llm.invoke(
-        f"""
-Extract the customer's phone number from this message.
+    f"""
+Extract the customer's phone number, appointment date, and appointment time.
+
+Today's date is 2026-11-02.
+The business timezone is Asia/Kolkata.
+
+Rules:
+- Convert relative dates and dates like "November 3" into YYYY-MM-DD.
+- For "November 3", use 2026-11-03.
+- Convert time into HH:MM using 24-hour format.
+- Return null for information not provided.
+- Do not guess missing information.
 
 Customer message:
 {user_message}
-
-If no phone number is present, return null.
 """
     )
+    print("CUSTOMER MESSAGE:", user_message)
+    print("EXTRACTED DATE:", result.appointment_date)
+    print("EXTRACTED TIME:", result.appointment_time)
 
     print("🔥 EXTRACTED:", result)
 
@@ -869,18 +889,28 @@ If no phone number is present, return null.
     if result.customer_phone:
         updates["customer_phone"] = result.customer_phone
 
+    if result.appointment_date:
+        updates["cancellation_date"]  = result.appointment_date
+
+    if result.appointment_time:
+        updates["cancellation_time"] = normalize_time(
+            result.appointment_time
+        )
+
+    print("🔥 CANCELLATION UPDATES:", updates)
+
     return updates
 
 
 def cancellation_node(state: AgentState):
     customer_phone = state.get("customer_phone", "")
-    appointment_date = state.get("appointment_date", "")
-    appointment_time = state.get("appointment_time", "")
-
-    print("🔥 CANCELLATION NODE")
+    appointment_date = state.get("cancellation_date", "")
+    appointment_time = state.get("cancellation_time", "")
     print("PHONE:", customer_phone)
-    print("DATE:", appointment_date)
-    print("TIME:", appointment_time)
+    print("CANCELLATION DATE:", appointment_date)
+    print("CANCELLATION TIME:", appointment_time)
+
+    
 
     if not customer_phone:
         return {
@@ -895,36 +925,68 @@ def cancellation_node(state: AgentState):
             "cancellation_in_progress": True,
         }
 
-    appointment = find_appointment.invoke({
+    print("FILTERS BEING SENT:", {
+    "customer_phone": customer_phone,
+    "appointment_date": appointment_date or None,
+    "appointment_time": appointment_time or None
+})
+
+    appointments = find_appointments.invoke({
     "customer_phone": customer_phone,
     "appointment_date": appointment_date or None,
     "appointment_time": appointment_time or None,
     })
 
-    if not appointment:
+    if not appointments:
         return {
             "messages": [
                 AIMessage(
                     content=(
-                        "I couldn't find a confirmed appointment "
-                        "with those details."
+                        "I couldn't find a confirmed appointment with those details. Could you check the phone number, date, or time?"
                     )
                 )
             ],
+            "cancellation_in_progress": True,
             "cancellation_in_progress": False,
         }
-    print("🔥 CANCELLATION NODE RETURNING CONFIRMATION")
+
+    if len(appointments)>1:
+        options="\n".join(
+            f"- {a['appointment_date']} at {a['appointment_time']}"
+            for a in appointments
+        )
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "I found multiple appointments associated with your number:\n"
+                        f"{options}\n\n"
+                        "Which appointment would you like to cancel? "
+                        "Please tell me the date and time."
+                    )
+                )
+            ],
+            "cancellation_in_progress": True,
+            "awaiting_cancellation_confirmation": False,
+        }
+    # exactly one appointment found
+    appointment=appointments[0]
+
+
     return {
         "messages": [
             AIMessage(
                 content=(
                     f"I found your appointment for "
-                    f"{appointment.appointment_date} at "
-                    f"{appointment.appointment_time}. "
-                    f"Would you like me to cancel it?"
+                    f"{appointment['appointment_date']} at "
+                    f"{appointment['appointment_time']}. "
+                    "Would you like me to cancel it?"
                 )
             )
         ],
+        "appointment_date": appointment["appointment_date"],
+        "appointment_time": appointment["appointment_time"],
         "cancellation_in_progress": False,
         "awaiting_cancellation_confirmation": True,
     }
@@ -972,19 +1034,20 @@ Customer message:
         ],
     }
 
-
+from app.services.calendar_service import delete_calendar_event
 def confirm_cancellation_node(state: AgentState):
 
     print("🔥🔥🔥 CONFIRM CANCELLATION NODE EXECUTED")
     customer_phone = state.get("customer_phone", "")
-    appointment_date = state.get("appointment_date", "")
-    appointment_time = state.get("appointment_time", "")
+    appointment_date = state.get("cancellation_date", "")
+    appointment_time = state.get("cancellation_time", "")
 
     appointment=find_appointment.invoke({
         "customer_phone":customer_phone,
         "appointment_date":appointment_date,
         "appointment_time":appointment_time
     })
+    print("STEP 1 RESULT:", appointment)
 
     if not appointment:
         return {
@@ -997,9 +1060,36 @@ def confirm_cancellation_node(state: AgentState):
             ],
         }
 
+    
+
+    if appointment.calendar_event_id:
+        try:
+            delete_calendar_event(appointment.calendar_event_id)
+            print("Google Calendar event deleted successfully")
+
+        except Exception as e:
+            print("Calendar deletion failed:", e)
+
+            return {
+                "awaiting_cancellation_confirmation":False,
+                "cancellation_confirmed": False,
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I couldn't cancel your appointment because "
+                            "there was a problem updating Google Calendar. "
+                            "Please try again."
+                        )
+                    )
+                ],
+            }
+
+    print("STEP 3: Updating database")
+
     result = cancel_appointment.invoke({
-    "appointment_id": appointment.id
-     })
+        "appointment_id": appointment.id
+    })
+    print("STEP 3 RESULT:", result)
 
     if not result["success"]:
         return {
@@ -1013,6 +1103,7 @@ def confirm_cancellation_node(state: AgentState):
     return {
         "awaiting_cancellation_confirmation": False,
         "cancellation_confirmed": True,
+        "cancellation_in_progress": False,
         "messages": [
             AIMessage(
                 content=(
