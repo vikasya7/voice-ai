@@ -529,3 +529,54 @@ def mark_appointment_failed(appointment_id:int):
         db.close()
 
 
+@tool
+def find_appointments(
+    customer_phone:str,
+    appointment_date:str | None=None,
+    appointment_time:str | None=None
+):
+    """
+    Find all confirmed appointments associated with a customer's phone number.
+
+    Args:
+        customer_phone: Customer's registered phone number.
+        appointment_date: Optional appointment date in YYYY-MM-DD format.
+        appointment_time: Optional appointment time in HH:MM format.
+
+    Returns:
+        A list of matching appointments.
+    """
+    db=SessionLocal()
+
+    try:
+        query=select(Appointment).where(
+            Appointment.customer_phone==customer_phone,
+            Appointment.status=="confirmed"
+        )
+        if appointment_date:
+            query = query.where(
+                Appointment.appointment_date == appointment_date
+            )
+        if appointment_time:
+            query = query.where(
+                Appointment.appointment_time == appointment_time
+            )
+
+        appointments=db.scalars(
+            query.order_by(
+                Appointment.appointment_date,
+                Appointment.appointment_time
+            )
+        ).all()
+
+        return [
+            {
+                "id": appointment.id,
+                "appointment_date": appointment.appointment_date,
+                "appointment_time": appointment.appointment_time,
+                "calendar_event_id": appointment.calendar_event_id,
+            }
+            for appointment in appointments
+        ]
+    finally:
+        db.close()
