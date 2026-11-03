@@ -1,8 +1,13 @@
-
+import os
 from io import BytesIO
-from openai import OpenAI
 
-client = OpenAI()
+from dotenv import load_dotenv
+from sarvamai import SarvamAI
+
+load_dotenv()
+client = SarvamAI(
+    api_subscription_key=os.environ["SARVAM_API_KEY"]
+)
 
 
 def speech_to_text(
@@ -12,17 +17,16 @@ def speech_to_text(
     audio_file = BytesIO(audio_bytes)
     audio_file.name = filename
 
-    transcription = client.audio.transcriptions.create(
-        model="gpt-transcribe",
+    transcription=client.speech_to_text.transcribe(
         file=audio_file,
-        language="en",
-        prompt=(
-            "English telephone conversation between a customer "
-            "and a receptionist. Transcribe exactly what the "
-            "caller says. Preserve names as spoken. Do not add "
-            "words that are not audible."
-        ),
+        model="saaras:v4",
+        language_code="hi-IN",
+        mode="codemix"
     )
 
-    print("📝 Recognized transcript:", repr(transcription.text))
-    return transcription.text
+
+    transcript=transcription.transcript 
+
+    print("📝 Sarvam transcript:", repr(transcript))
+
+    return transcript
