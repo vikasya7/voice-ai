@@ -596,8 +596,9 @@ async def media_stream(websocket: WebSocket):
 
                                 config=config,
                             )
-                            response_text = result.get("assistant_response",result["messages"][-1].content)
-                            spoken_text=result.get("spoken_response",response_text)
+                            #actual assistant response exists inside messages, but the separate assistant_response field is still None. so we used or as it picks first truthy value
+                            response_text = result.get("assistant_response") or result["messages"][-1].content
+                            spoken_text=result.get("spoken_response") or response_text
 
 
 
