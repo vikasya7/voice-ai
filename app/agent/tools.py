@@ -580,3 +580,30 @@ def find_appointments(
         ]
     finally:
         db.close()
+
+
+@tool
+def get_appointment_by_id(
+    appointment_id:int,
+    customer_phone:str
+)-> dict|None:
+    """
+    Retrieve a confirmed appointment using its ID
+    and verify that it belongs to the customer.
+    """
+    with SessionLocal() as db:
+        appointment=db.get(Appointment,appointment_id)
+        if not appointment:
+            return None
+
+        if appointment.status!="confirmed":
+            return None
+        if appointment.customer_phone!=customer_phone:
+            return None
+
+        return {
+            "id":appointment_id,
+            "appointment_date":appointment.appointment_date,
+            "appointment_time":appointment.appointment_time,
+            "calendar_event_id":appointment.calendar_event_id
+        }

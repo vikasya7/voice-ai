@@ -1,5 +1,5 @@
 from typing import Annotated, TypedDict
-
+from typing_extensions import NotRequired
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
@@ -36,7 +36,8 @@ class AgentState(TypedDict):
     awaiting_new_time: bool
     cancellation_date: str
     cancellation_time: str
-    
+    # Stores the ID of the appointment selected for cancellation
+    selected_appointment_id: NotRequired[int | None]
 
 
 class AppointmentDetails(BaseModel):
