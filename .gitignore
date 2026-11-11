@@ -57,3 +57,4 @@ checkpoints.db-shm
 checkpoints.db-shm
 credentials.json
 token.json
+token.json.backup

@@ -929,7 +929,7 @@ def cancellation_node(state: AgentState):
     "customer_phone": customer_phone,
     "appointment_date": appointment_date or None,
     "appointment_time": appointment_time or None
-})
+    })
 
     appointments = find_appointments.invoke({
     "customer_phone": customer_phone,
@@ -947,7 +947,6 @@ def cancellation_node(state: AgentState):
                 )
             ],
             "cancellation_in_progress": True,
-            "cancellation_in_progress": False,
         }
 
     if len(appointments)>1:
@@ -988,6 +987,7 @@ def cancellation_node(state: AgentState):
         "appointment_date": appointment["appointment_date"],
         "appointment_time": appointment["appointment_time"],
         "cancellation_in_progress": False,
+        "selected_appointment_id": appointment["id"],
         "awaiting_cancellation_confirmation": True,
     }
 
@@ -1035,45 +1035,58 @@ Customer message:
     }
 
 from app.services.calendar_service import delete_calendar_event
+from app.agent.tools import get_appointment_by_id
 def confirm_cancellation_node(state: AgentState):
 
     print("🔥🔥🔥 CONFIRM CANCELLATION NODE EXECUTED")
-    customer_phone = state.get("customer_phone", "")
-    appointment_date = state.get("cancellation_date", "")
-    appointment_time = state.get("cancellation_time", "")
+    appointment_id=state.get("selected_appointment_id")
+    customer_phone=state.get("customer_phone")
 
-    appointment=find_appointment.invoke({
-        "customer_phone":customer_phone,
-        "appointment_date":appointment_date,
-        "appointment_time":appointment_time
-    })
-    print("STEP 1 RESULT:", appointment)
-
-    if not appointment:
+    # 1 Validate state
+    if appointment_id is None or not customer_phone:
         return {
-            "awaiting_cancellation_confirmation": False,
-            "cancellation_confirmed": False,
+            "awaiting_cancellation_confirming":False,
+            "cancellation_confirmed":False,
             "messages": [
                 AIMessage(
-                    content="I couldn't find that appointment."
+                    content="I couldn't identify the appointment. Please try again."
                 )
             ],
         }
 
-    
+    # 2 Retrieves the exact apoointment by id
+    appointment=get_appointment_by_id.invoke({
+        "appointment_id":appointment_id,
+        "customer_phone":customer_phone
+    })
 
-    if appointment.calendar_event_id:
+    print("APPOINTMENT FOUND:", appointment)
+
+    if not appointment:
+        return {
+            "awaiting_cancellation_confirmation":False,
+            "cancellation_confirmed":False,
+            "messages": [
+                AIMessage(
+                    content="I couldn't find a confirmed appointment with those details."
+                )
+            ],
+        }
+    # Step 3 : Delete google calendar event
+
+    if appointment["calendar_event_id"]:
         try:
-            delete_calendar_event(appointment.calendar_event_id)
+            delete_calendar_event(
+                appointment["calendar_event_id"]
+            )
             print("Google Calendar event deleted successfully")
-
         except Exception as e:
-            print("Calendar deletion failed:", e)
+            print("❌ Google Calendar deletion failed:", repr(e))
 
             return {
                 "awaiting_cancellation_confirmation":False,
-                "cancellation_confirmed": False,
-                "messages": [
+                "cancellation_confirmed":False,
+                 "messages": [
                     AIMessage(
                         content=(
                             "I couldn't cancel your appointment because "
@@ -1084,12 +1097,10 @@ def confirm_cancellation_node(state: AgentState):
                 ],
             }
 
-    print("STEP 3: Updating database")
-
-    result = cancel_appointment.invoke({
-        "appointment_id": appointment.id
+    # step 4 updating the database
+    result=cancel_appointment.invoke({
+            "appointment_id":appointment["id"]
     })
-    print("STEP 3 RESULT:", result)
 
     if not result["success"]:
         return {
@@ -1099,22 +1110,24 @@ def confirm_cancellation_node(state: AgentState):
                 AIMessage(content=result["message"])
             ],
         }
-
+         # Step 5: Return success
     return {
         "awaiting_cancellation_confirmation": False,
         "cancellation_confirmed": True,
         "cancellation_in_progress": False,
+        "selected_appointment_id": None,
         "messages": [
             AIMessage(
                 content=(
                     f"Your appointment for "
-                    f"{appointment.appointment_date} at "
-                    f"{appointment.appointment_time} "
+                    f"{appointment['appointment_date']} at "
+                    f"{appointment['appointment_time']} "
                     f"has been cancelled successfully."
                 )
             )
         ],
     }
+
 
 reschedule_details_llm = llm.with_structured_output(
     RescheduleDetails
