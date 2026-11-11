@@ -36,22 +36,21 @@ def test_cancellation_flow():
 
     # 2 provide phone number
 
-    result=run_message(
-        session_id,
-        "1234567890"
-    )
+    assert result["customer_phone"] == "1234567890"
 
-    assert result["customer_phone"]=="1234567890"
+# 3. Select one appointment from the list
+    result = run_message(
+    session_id,
+    "I want to cancel my appointment on 2026-11-03 at 18:00"
+)
 
-    # agent should ask for confirmation
-
+# Agent should now ask for confirmation
     assert result["awaiting_cancellation_confirmation"] is True
 
-    result=run_message(
-        session_id,
-        "Yes"
-    )
-     # 4. Cancellation should succeed
+# 4. Confirm cancellation
+    result = run_message(
+    session_id,
+    "Yes"
+)
+
     assert result["cancellation_confirmed"] is True
-
-
