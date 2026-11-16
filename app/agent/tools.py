@@ -185,6 +185,17 @@ def cancel_appointment(appointment_id: int):
                 "message": "Appointment not found."
             }
 
+        if appointment.status=="cancelled":
+            return {
+                "success":False,
+                "message":"Appointment is already cancelled."
+            }
+        if appointment.status != "confirmed":
+            return {
+               "success": False,
+               "message": "Only confirmed appointments can be cancelled."
+            }
+
         appointment.status = "cancelled"
         try:
             db.commit()
@@ -205,11 +216,17 @@ def cancel_appointment(appointment_id: int):
 
     except Exception as e:
         db.rollback()
+        print("❌ CANCELLATION ERROR:", repr(e))
 
         return {
-            "success": False,
-            "message": "Sorry, something went wrong while cancelling the appointment.",
+        "success": False,
+        "message": str(e),
         }
+
+        # return {
+        #     "success": False,
+        #     "message": "Sorry, something went wrong while cancelling the appointment.",
+        # }
 
     finally:
         db.close()
