@@ -5,6 +5,12 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 
 
+class RescheduleChoice(TypedDict):
+    id: int
+    appointment_date: str
+    appointment_time: str
+
+
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
@@ -26,6 +32,8 @@ class AgentState(TypedDict):
     reschedule_in_progress: bool
     awaiting_reschedule_confirmation: bool
     reschedule_confirmed: bool
+    reschedule_choices: NotRequired[list[RescheduleChoice]]
+    reschedule_selected_appointment_id: NotRequired[int | None]
     preferred_time: str
     requirement: str
     lead_in_progress: bool
