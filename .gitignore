@@ -58,3 +58,11 @@ checkpoints.db-shm
 credentials.json
 token.json
 token.json.backup
+# Google OAuth credentials
+token.json
+token_backup.json
+credentials.json
+client_secret*.json
+
+.env
+.env.*
