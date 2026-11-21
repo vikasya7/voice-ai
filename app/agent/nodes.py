@@ -5,12 +5,12 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
-from app.voice.normalization import normalize_phone
+from app.voice.normalization import DIGIT_WORDS, normalize_phone
 from app.agent.state import AgentState, AppointmentDetails,RescheduleDetails,LeadDetails
 from app.agent.tools import (
     check_availability,
     book_appointment,
-    find_appointment,
+    get_appointment_by_id,
     find_appointments,
     cancel_appointment,
     reschedule_appointment,
@@ -1035,7 +1035,6 @@ Customer message:
     }
 
 from app.services.calendar_service import delete_calendar_event
-from app.agent.tools import get_appointment_by_id
 def confirm_cancellation_node(state: AgentState):
 
     print("🔥🔥🔥 CONFIRM CANCELLATION NODE EXECUTED")
@@ -1135,7 +1134,8 @@ reschedule_details_llm = llm.with_structured_output(
 
 
 def extract_reschedule_details(state: AgentState):
-    print("🔥 EXTRACT RESCHEDULE DETAILS")
+    if state.get("reschedule_choices"):
+        return {}
 
     user_message = state["messages"][-1].content
 
@@ -1182,8 +1182,6 @@ Customer message:
 """
     )
 
-    print("🔥 RESCHEDULE EXTRACTED:", result)
-
     updates = {}
 
     if result.customer_phone:
@@ -1202,11 +1200,6 @@ def reschedule_node(state:AgentState):
     customer_phone=state.get("customer_phone","")
     new_date=state.get("appointment_date","")
     new_time=state.get("appointment_time","")
-
-    print("🔥 RESCHEDULE NODE")
-    print("PHONE:", customer_phone)
-    print("NEW DATE:", new_date)
-    print("NEW TIME:", new_time)
 
     # ask for phone number
     if not customer_phone:
@@ -1241,23 +1234,48 @@ def reschedule_node(state:AgentState):
             ],
             "reschedule_in_progress": True,
         }
-    # 4. Find existing appointment
-    appointment = find_appointment.invoke({
-        "customer_phone": customer_phone,
-    })
-
-    if not appointment:
-        return {
-            "messages": [
-                AIMessage(
-                    content=(
-                        "I couldn't find a confirmed appointment "
-                        "with that phone number."
-                    )
-                )
-            ],
-            "reschedule_in_progress": False,
-        }
+    choices = state.get("reschedule_choices")
+    if choices:
+        reply = state["messages"][-1].content
+        selection = ""
+        if isinstance(reply, str):
+            selection = reply.strip().lower().rstrip(".!").removeprefix("option ").strip()
+            selection = DIGIT_WORDS.get(selection, selection)
+        appointment = next(
+            (item for number, item in enumerate(choices, 1) if str(number) == selection),
+            None,
+        )
+        if appointment is None:
+            return {
+                "messages": [AIMessage(
+                    content=f"Please reply with a number from 1 to {len(choices)}."
+                )],
+            }
+    else:
+        appointments = find_appointments.invoke({"customer_phone": customer_phone})
+        if not appointments:
+            return {
+                "messages": [AIMessage(
+                    content="I couldn't find a confirmed appointment with that phone number."
+                )],
+                "reschedule_in_progress": False,
+            }
+        if len(appointments) > 1:
+            options = "\n".join(
+                f"{number}. {item['appointment_date']} at {item['appointment_time']}"
+                for number, item in enumerate(appointments, 1)
+            )
+            return {
+                "messages": [AIMessage(
+                    content=f"Which appointment would you like to move? Reply with its number.\n{options}"
+                )],
+                "reschedule_in_progress": True,
+                "reschedule_choices": [
+                    {key: item[key] for key in ("id", "appointment_date", "appointment_time")}
+                    for item in appointments
+                ],
+            }
+        appointment = appointments[0]
 
     # 5. Check whether new slot is available
     is_available = check_availability.invoke({
@@ -1276,6 +1294,7 @@ def reschedule_node(state:AgentState):
                 )
             ],
             "reschedule_in_progress": True,
+            "reschedule_choices": [],
         }
 
     # 6. Ask for confirmation
@@ -1284,8 +1303,8 @@ def reschedule_node(state:AgentState):
             AIMessage(
                 content=(
                     f"I found your appointment for "
-                    f"{appointment.appointment_date} at "
-                    f"{appointment.appointment_time}. "
+                    f"{appointment['appointment_date']} at "
+                    f"{appointment['appointment_time']}. "
                     f"Would you like to move it to "
                     f"{new_date} at {new_time}?"
                 )
@@ -1293,6 +1312,8 @@ def reschedule_node(state:AgentState):
         ],
         "reschedule_in_progress": False,
         "awaiting_reschedule_confirmation": True,
+        "reschedule_choices": [],
+        "reschedule_selected_appointment_id": appointment["id"],
     }
 
 
@@ -1331,6 +1352,7 @@ Customer message:
     return {
         "reschedule_confirmed": False,
         "awaiting_reschedule_confirmation": False,
+        "reschedule_selected_appointment_id": None,
         "messages": [
             AIMessage(
                 content=(
@@ -1348,12 +1370,17 @@ def confirm_reschedule_node(state:AgentState):
     new_date = state.get("appointment_date", "")
     new_time = state.get("appointment_time", "")
 
-    appointment = find_appointment.invoke({
-        "customer_phone": customer_phone,
-    })
+    appointment_id = state.get("reschedule_selected_appointment_id")
+    appointment = None
+    if appointment_id is not None and customer_phone:
+        appointment = get_appointment_by_id.invoke({
+            "appointment_id": appointment_id,
+            "customer_phone": customer_phone,
+        })
     if not appointment:
         return {
             "awaiting_reschedule_confirmation": False,
+            "reschedule_selected_appointment_id": None,
             "reschedule_confirmed": False,
             "messages": [
                 AIMessage(
@@ -1363,7 +1390,7 @@ def confirm_reschedule_node(state:AgentState):
         }
 
     result = reschedule_appointment.invoke({
-        "appointment_id":appointment.id,
+        "appointment_id": appointment["id"],
         "new_date":new_date,
         "new_time":new_time,
     })
@@ -1371,6 +1398,7 @@ def confirm_reschedule_node(state:AgentState):
     if not result["success"]:
         return {
             "awaiting_reschedule_confirmation": False,
+            "reschedule_selected_appointment_id": None,
             "reschedule_confirmed": False,
             "messages": [
                 AIMessage(
@@ -1381,6 +1409,7 @@ def confirm_reschedule_node(state:AgentState):
 
     return {
         "awaiting_reschedule_confirmation": False,
+        "reschedule_selected_appointment_id": None,
         "reschedule_confirmed": True,
         "messages": [
             AIMessage(
