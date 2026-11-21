@@ -18,35 +18,43 @@ SCOPES = [
 ]
 
 
+
 def get_google_credentials() -> Credentials:
     creds = None
 
     if TOKEN_FILE.exists():
-        creds=Credentials.from_authorized_user_file(
+        creds = Credentials.from_authorized_user_file(
             str(TOKEN_FILE),
             SCOPES
         )
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
 
-        else:
+            except Exception as e:
+                print(f"Google token refresh failed: {e}")
+                creds = None
+
+        if not creds:
             if not CREDENTIALS_FILE.exists():
                 raise FileNotFoundError(
-                    f"Missing OAuth credentials :{CREDENTIALS_FILE}"
+                    f"Missing OAuth credentials: {CREDENTIALS_FILE}"
                 )
-            flow=InstalledAppFlow.from_client_secrets_file(
+
+            flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE),
                 SCOPES
             )
-            creds=flow.run_local_server(port=0)
-    
+
+            creds = flow.run_local_server(port=0)
 
         TOKEN_FILE.write_text(creds.to_json())
         os.chmod(TOKEN_FILE, 0o600)
 
     return creds
+
 
 def get_calendar_service():
     return build(
@@ -64,3 +72,7 @@ def get_gmail_service():
         cache_discovery=False
     )
 
+if __name__ == "__main__":
+    credentials = get_google_credentials()
+    print("Google authentication successful!")
+    print("Scopes:", credentials.scopes)

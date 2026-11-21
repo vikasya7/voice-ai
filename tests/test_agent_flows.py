@@ -60,6 +60,14 @@ def test_booking_flow():
 
     assert result["service"].lower() == "hair spa"
 
+    # 5. Provide email
+    result = run_message(
+    session_id,
+      "My email is vikasyaa19@gmail.com"
+    )
+
+    assert result["customer_email"] == "vikasyaa19@gmail.com"
+
     print("\nFINAL STATE AFTER SERVICE:")
     print(result)
 
