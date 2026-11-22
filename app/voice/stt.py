@@ -27,6 +27,5 @@ def speech_to_text(
 
     transcript=transcription.transcript 
 
-    print("📝 Sarvam transcript:", repr(transcript))
 
     return transcript

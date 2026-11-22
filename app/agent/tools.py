@@ -216,7 +216,7 @@ def cancel_appointment(appointment_id: int):
 
     except Exception as e:
         db.rollback()
-        print("❌ CANCELLATION ERROR:", repr(e))
+        print("❌ CANCELLATION ERROR:", type(e).__name__)
 
         return {
         "success": False,

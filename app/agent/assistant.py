@@ -86,24 +86,9 @@ def assistant_node(state):
         "messages": state['messages']
     })
 
-    # Log actual tool calls and results.
     for message in result["messages"]:
-        tool_calls = getattr(message, "tool_calls", None)
-
-        if tool_calls:
-            for call in tool_calls:
-                print(
-                    "TOOL CALL:",
-                    call.get("name"),
-                    call.get("args"),
-                )
-
-        if getattr(message, "type", None) == "tool":
-            print(
-                "TOOL RESULT:",
-                message.name,
-                message.content,
-            )
+        for call in getattr(message, "tool_calls", ()) or ():
+            print("Assistant tool invoked:", call.get("name"))
 
     # The agent's final answer.
     final_message = result["messages"][-1]
