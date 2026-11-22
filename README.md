@@ -173,13 +173,39 @@ voice-agent/
 └── README.md
 ```
 
+## Try the local demo
+
+With Python 3.11 active, run these commands from the repository root.
+
+```bash
+python -m pip install fastapi==0.141.1 uvicorn==0.53.0
+python -m uvicorn app.demo:app --port 8000
+```
+
+Open [the interactive API docs](http://127.0.0.1:8000/docs) and send commands to `POST /call`. Use the same `session_id` for each message.
+
+```json
+{"session_id": "demo-1", "message": "appointments"}
+```
+
+| Try this message | Then reply |
+| --- | --- |
+| `appointments` | See two sample appointments. |
+| `book 2030-06-10 14:00 demo@example.test` | `yes` to book appointment 3. |
+| `reschedule 3 2030-06-10 15:00` | `yes` to move it. |
+| `cancel 3` | `yes` to cancel it, or `no` to keep it. |
+| `callback` | `yes` to queue a simulated staff callback. |
+
+The demo uses scripted commands and in-memory data. Restarting it resets the sample appointments. It requires no credentials, makes no calls to external services, and sends no email. The live backend setup is below.
+
 ## Getting Started
 
 ### Prerequisites
 
 Make sure you have the following installed:
 
-- Python 3.10+
+- Python 3.11 (the voice pipeline uses the standard-library `audioop` module)
+- FFmpeg for MP3 conversion
 - PostgreSQL
 - Git
 - A Twilio account
@@ -196,7 +222,7 @@ cd voice-agent
 ### 2. Create a Virtual Environment
 
 ```bash
-python -m venv venv
+python3.11 -m venv venv
 ```
 
 Activate it:
@@ -221,23 +247,15 @@ pip install -r requirements.txt
 
 ### 4. Configure Environment Variables
 
-Create a `.env` file in the project root.
+Copy the environment template and fill in the values for the integrations you want to use.
 
-Add your required configuration:
-
-```env
-OPENAI_API_KEY=your_openai_api_key
-
-DATABASE_URL=postgresql://username:password@localhost:5432/voice_agent
-
-TWILIO_ACCOUNT_SID=your_twilio_account_sid
-TWILIO_AUTH_TOKEN=your_twilio_auth_token
-TWILIO_PHONE_NUMBER=your_twilio_phone_number
+```bash
+cp .env.example .env
 ```
 
-Add any additional environment variables required by your implementation.
+The backend needs PostgreSQL, OpenAI, and Sarvam settings at startup. For Twilio calls, set the Twilio credentials and set `NGROK_DOMAIN` to your public hostname without a scheme or path. Outbound calls also require `OUTBOUND_CALL_API_KEY`. Set `HANDOFF_NOTIFICATION_EMAIL` to enable staff callback emails and `PARALLEL_API_KEY` to enable web search.
 
-**Important:** Never commit API keys, credentials or sensitive configuration files to GitHub.
+Keep your filled-in `.env` and Google OAuth files private.
 
 ### 5. Configure Google OAuth
 
