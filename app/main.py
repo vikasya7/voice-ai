@@ -1,5 +1,7 @@
 
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from fastapi import UploadFile,File
@@ -10,6 +12,18 @@ from app.database.database import Base, engine
 from app.database import models
 from app.agent.tools import log_conversation
 from fastapi.responses import Response
+
+class _AccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn logs the request target, including any query parameters.
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            client, method, target, version, status = args
+            record.args = (client, method, target.partition("?")[0], version, status)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_AccessLogFilter())
 
 app = FastAPI(
     title="AI Voice Agent"
@@ -114,7 +128,7 @@ def handle_call(request: CallRequest):
             "intent": intent,
         })
     except Exception as e:
-        print(f"⚠️ Conversation logging failed: {e}")
+        print(f"⚠️ Conversation logging failed: {type(e).__name__}")
 
     return {
         "intent": intent,
@@ -167,7 +181,7 @@ async def voice_call(
             "intent": result.get("intent"),
         })
     except Exception as e:
-        print(f" Conversation logging failed: {e}")
+        print(f" Conversation logging failed: {type(e).__name__}")
 
      # Text → speech
     audio_response = text_to_speech(response_text)
@@ -183,33 +197,37 @@ async def voice_call(
 
 
 
+from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from fastapi import WebSocket,WebSocketDisconnect
 
 import re
 @app.post("/twilio/voice")
-async def twilio_voice():
+async def twilio_voice(request: Request):
+    if not TWILIO_AUTH_TOKEN or not NGROK_DOMAIN:
+        raise HTTPException(status_code=503, detail="Twilio webhook is not configured.")
 
-    print("🔥 TWILIO VOICE WEBHOOK HIT")
+    signature = request.headers.get("X-Twilio-Signature")
+    if not signature:
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature.")
+
+    # Twilio signs the public HTTPS URL, which may differ from the proxy's URL.
+    raw_path = request.scope.get("raw_path") or request.url.path.encode("ascii")
+    public_url = f"https://{NGROK_DOMAIN}{raw_path.decode('ascii')}"
+    query = request.scope["query_string"]
+    if query:
+        public_url += "?" + query.decode("ascii")
+
+    async with request.form() as form:
+        if not RequestValidator(TWILIO_AUTH_TOKEN).validate(public_url, form, signature):
+            raise HTTPException(status_code=403, detail="Invalid Twilio signature.")
 
     response = VoiceResponse()
-
     connect = Connect()
-
-    connect.stream(
-        url="wss://plus-heat-ecosystem.ngrok-free.dev/media"
-    )
-
-    # IMPORTANT: add Connect to the response
+    connect.stream(url=f"wss://{NGROK_DOMAIN}/media")
     response.append(connect)
+    return Response(content=str(response), media_type="application/xml")
 
-    print("📄 TwiML:")
-    print(str(response))
-
-    return Response(
-        content=str(response),
-        media_type="application/xml"
-    )
 
 
 import base64
@@ -262,7 +280,7 @@ async def send_agent_audio(websocket, stream_sid, ulaw_audio):
         print("✅ Agent audio sent; waiting for playback mark")
 
     except Exception as e:
-        print(f"❌ Audio sending failed: {type(e).__name__}: {e}")
+        print(f"❌ Audio sending failed: {type(e).__name__}")
 
 
 # for reference
@@ -278,6 +296,23 @@ async def send_agent_audio(websocket, stream_sid, ulaw_audio):
 import asyncio
 @app.websocket("/media")
 async def media_stream(websocket: WebSocket):
+    signature = websocket.headers.get("X-Twilio-Signature")
+    if not TWILIO_AUTH_TOKEN or not NGROK_DOMAIN or not signature or websocket.url.query:
+        await websocket.close(code=1008)
+        return
+
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    # The upgrade may be signed as an HTTPS or WSS URL. Twilio also
+    # documents a trailing-slash variant for voice stream handshakes.
+    public_urls = (f"https://{NGROK_DOMAIN}/media", f"wss://{NGROK_DOMAIN}/media")
+    if not any(
+        validator.validate(url + suffix, {}, signature)
+        for url in public_urls
+        for suffix in ("", "/")
+    ):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     print("📞 Twilio Media Stream connected")
 
@@ -292,7 +327,7 @@ async def media_stream(websocket: WebSocket):
     stream_sid = None
     session_id = None
     agent_speaking = False
-    outbound_greeting_sent = False
+    initial_greeting_sent = False
     awaiting_outbound_confirmation = False
 
     try:
@@ -309,7 +344,7 @@ async def media_stream(websocket: WebSocket):
             except Exception as e:
                 print(
                     f"⚠️ WebSocket receive error: "
-                    f"{type(e).__name__}: {e}"
+                    f"{type(e).__name__}"
                 )
                 break
 
@@ -332,7 +367,6 @@ async def media_stream(websocket: WebSocket):
                 stream_sid = message["start"]["streamSid"]
                 session_id = stream_sid
 
-                print(f"🆔 Session ID: {session_id}")
 
                 # call type
                 custom_parameters=(
@@ -343,43 +377,28 @@ async def media_stream(websocket: WebSocket):
                     "call_type",
                     "inbound"
                 )
-                print(f"📞 Call type: {call_type}")
+                print("📞 Call type:", "outbound" if call_type == "outbound" else "inbound")
 
 
-                if call_type == "outbound" and not outbound_greeting_sent:
-                    outbound_greeting_sent = True
-                    awaiting_outbound_confirmation = True
-
-                    greeting = (
-                       "Hi, this is the VIKAS  AI assistant. "
-                       "I'm calling to speak with you. "
-                       "Is this a good time to talk?"
-                   )
-
-                    print("📞 Sending outbound greeting")
-
-                    agent_speaking = True
-                    print("1️⃣ Before text_to_speech")
-
-                    mp3_audio = text_to_speech(greeting)
-                    print(f"2️⃣ TTS completed. Audio size: {len(mp3_audio)} bytes")
-                    print("3️⃣ Before audio conversion")
-
-                    ulaw_audio = mp3_to_twilio_ulaw(mp3_audio)
-                    print(f"4️⃣ Conversion completed. Audio size: {len(ulaw_audio)} bytes")
-                    print("5️⃣ Before creating audio task")
-
-                    audio_task = asyncio.create_task(
-                       send_agent_audio(
-                           websocket,
-                           stream_sid,
-                           ulaw_audio
+                if not initial_greeting_sent:
+                    initial_greeting_sent = True
+                    if call_type == "outbound":
+                        awaiting_outbound_confirmation = True
+                        greeting = (
+                            "Hi, this is the VIKAS AI assistant. "
+                            "I'm calling to speak with you. "
+                            "Is this a good time to talk?"
                         )
+                    else:
+                        greeting = "Hi, this is the VIKAS AI assistant. How can I help you today?"
+
+                    print("📞 Sending initial greeting")
+                    agent_speaking = True
+                    mp3_audio = text_to_speech(greeting)
+                    ulaw_audio = mp3_to_twilio_ulaw(mp3_audio)
+                    audio_task = asyncio.create_task(
+                        send_agent_audio(websocket, stream_sid, ulaw_audio)
                     )
-                    print("6️⃣ Audio task created")
-
-
-                    print("📞 Outbound greeting sent")
 
             # -----------------------------------
             # INCOMING AUDIO
@@ -468,15 +487,12 @@ async def media_stream(websocket: WebSocket):
                             filename="twilio_turn.wav"
                         )
 
-                        print(
-                            f"📝 Transcript: {transcript}"
-                        )
 
                     except Exception as e:
 
                         print(
                             f"❌ STT error: "
-                            f"{type(e).__name__}: {e}"
+                            f"{type(e).__name__}"
                         )
 
                         continue
@@ -501,10 +517,6 @@ async def media_stream(websocket: WebSocket):
                               transcript.lower()
                         ).strip()
 
-                        print(
-                        f"📞 Outbound confirmation response: "
-                        f"{normalized}"
-                         )
 
                          # -------------------------------
                        # YES
@@ -599,32 +611,9 @@ async def media_stream(websocket: WebSocket):
                             #actual assistant response exists inside messages, but the separate assistant_response field is still None. so we used or as it picks first truthy value
                             response_text = result.get("assistant_response") or result["messages"][-1].content
                             spoken_text=result.get("spoken_response") or response_text
-
-
-
-                            print("📝 CURRENT TRANSCRIPT:", repr(transcript))
-                            print("💬 LAST GRAPH MESSAGE:", repr(result["messages"][-1].content))
-                            print("🤖 ASSISTANT RESPONSE:", repr(result.get("assistant_response")))
-                            print("🔊 SPOKEN RESPONSE:", repr(result.get("spoken_response")))
-
-                            
-
-                            
-                            print(
-                                        f"🤖 Agent: {response_text}"
-                            )
-                            print(
-                                f"🤖 Agent: {spoken_text}"
-                            )
                         except Exception as e:
-                        
-                                print(
-                                    f"❌ Agent error: "
-                                    f"{type(e).__name__}: {e}"
-                                )
-                        
-                                continue
-
+                            print(f"❌ Agent error: {type(e).__name__}")
+                            continue
 
                     # -----------------------------------
                     # TTS
@@ -651,7 +640,7 @@ async def media_stream(websocket: WebSocket):
 
                         print(
                             f"❌ TTS error: "
-                            f"{type(e).__name__}: {e}"
+                            f"{type(e).__name__}"
                         )
 
                         continue
@@ -677,7 +666,7 @@ async def media_stream(websocket: WebSocket):
 
                         print(
                             f"❌ Audio conversion error: "
-                            f"{type(e).__name__}: {e}"
+                            f"{type(e).__name__}"
                         )
 
                         continue
@@ -714,8 +703,7 @@ async def media_stream(websocket: WebSocket):
                 )
 
                 print(
-                    f"✅ Twilio finished playing: "
-                    f"{mark_name}"
+                    "✅ Twilio playback mark received"
                 )
 
                 if mark_name == "agent_response":
@@ -740,9 +728,7 @@ async def media_stream(websocket: WebSocket):
             # -----------------------------------
             else:
 
-                print(
-                    f"ℹ️ Twilio event: {event}"
-                )
+                print("Ignoring unsupported Twilio event")
 
     except WebSocketDisconnect as e:
 
@@ -755,7 +741,7 @@ async def media_stream(websocket: WebSocket):
 
         print(
             f"❌ Media stream error: "
-            f"{type(e).__name__}: {e}"
+            f"{type(e).__name__}"
         )
 
     finally:
@@ -767,8 +753,9 @@ async def media_stream(websocket: WebSocket):
         )
 
 import os
+import secrets
 from twilio.rest import Client
-from fastapi import HTTPException
+from fastapi import Header, HTTPException
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
@@ -782,7 +769,16 @@ twilio_client = Client(
 
 
 @app.post("/outbound-call")
-def outbound_call(phone_number:str):
+def outbound_call(
+    phone_number: str,
+    api_key: str | None = Header(default=None, alias="X-Outbound-Call-Key"),
+):
+    expected_key = os.getenv("OUTBOUND_CALL_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="Outbound calling is disabled.")
+    if not api_key or not secrets.compare_digest(api_key.encode(), expected_key.encode()):
+        raise HTTPException(status_code=401, detail="Invalid outbound call API key.")
+
     try:
         twiml = f"""
 <Response>
@@ -799,8 +795,6 @@ def outbound_call(phone_number:str):
             twiml=twiml
         )
         print("Outbound call started")
-        print("Call SID:",call.sid)
-        print("📱 To:", phone_number)
 
 
         return {
@@ -808,9 +802,9 @@ def outbound_call(phone_number:str):
             "call_sid":call.sid,
             "to":phone_number
         }
-    except Exception as e:
-        print("❌ Outbound call failed:", e)
+    except Exception as exc:
+        print("Outbound call failed:", type(exc).__name__)
         raise HTTPException(
             status_code=500,
-            detail=str(e)
-        )
+            detail="Could not start the outbound call.",
+        ) from exc

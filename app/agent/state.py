@@ -38,6 +38,7 @@ class AgentState(TypedDict):
     requirement: str
     lead_in_progress: bool
     lead_saved: bool
+    awaiting_handoff_phone: NotRequired[bool]
     assistant_response: str
     spoken_response: str
     sources: list[str]

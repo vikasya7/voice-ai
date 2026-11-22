@@ -141,3 +141,41 @@ def delete_calendar_event(
         raise RuntimeError(
             f"Google Calendar event deletion failed: {exc}"
         ) from exc
+
+
+def _patch_event_time(service, calendar_id, event_id, times, etag):
+    request = service.events().patch(
+        calendarId=calendar_id,
+        eventId=event_id,
+        body=times,
+    )
+    request.headers["If-Match"] = etag
+    return request.execute()
+
+
+def move_calendar_event(event_id: str, new_start: datetime, calendar_id: str = "primary"):
+    """Move a timed event and return the information needed to restore it."""
+    service = get_calendar_service()
+    event = service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    if event.get("status") == "cancelled":
+        raise ValueError("Calendar event is cancelled")
+
+    previous_times = {key: event[key] for key in ("start", "end")}
+    old_start = datetime.fromisoformat(previous_times["start"]["dateTime"].replace("Z", "+00:00"))
+    old_end = datetime.fromisoformat(previous_times["end"]["dateTime"].replace("Z", "+00:00"))
+    new_end = new_start + (old_end - old_start)
+    availability = check_availability(new_start, new_end, calendar_id)
+    if any(conflict["id"] != event_id for conflict in availability["conflicts"]):
+        return None
+
+    times = {
+        key: {"dateTime": value.isoformat(), "timeZone": TIMEZONE}
+        for key, value in (("start", new_start), ("end", new_end))
+    }
+    updated = _patch_event_time(service, calendar_id, event_id, times, event["etag"])
+    return previous_times, updated["etag"]
+
+
+def restore_calendar_event_time(event_id, previous_times, etag, calendar_id="primary"):
+    """Restore event times if the event has not been edited since the move."""
+    _patch_event_time(get_calendar_service(), calendar_id, event_id, previous_times, etag)

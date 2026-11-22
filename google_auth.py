@@ -34,7 +34,7 @@ def get_google_credentials() -> Credentials:
                 creds.refresh(Request())
 
             except Exception as e:
-                print(f"Google token refresh failed: {e}")
+                print(f"Google token refresh failed: {type(e).__name__}")
                 creds = None
 
         if not creds:

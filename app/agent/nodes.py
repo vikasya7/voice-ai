@@ -1,4 +1,6 @@
 
+import logging
+import os
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -89,14 +91,25 @@ Categories:
 - other: Anything that does not fit the categories above.
 
 Important rules:
-1. Use the conversation history to understand short replies.
-2. If the customer is answering the assistant's previous question,
-   classify based on the ongoing conversation.
-3. "To gain weight" after a question about calorie goals is
-   a continuation of the general assistance conversation: assistant.
-4. Never classify a cancellation request as lead.
-5. Questions about business services, pricing, and hours are faq.
-6. Classify only the latest customer message, not the assistant's message.
+1. Interpret the latest customer message in the context of the recent conversation.
+2. When a reply answers a clarifying question or continues the same topic,
+   use the intent for that topic. Use the previous intent as a hint.
+3. Classify a clear change of topic by the new request, even if the previous
+   intent was different. Booking, cancellation, and rescheduling requests
+   should enter their respective workflows.
+4. Use faq for questions about this business's services, prices, policies,
+   or hours. Use assistant for prices or information about external
+   products and services.
+
+Examples:
+- After the assistant asks which platform to check for a video game price,
+  "PlayStation", "How much does it cost on PS?", and "Yes" continue the
+  assistant conversation. An ambiguous acknowledgement can be clarified there.
+- "To gain weight" after a question about calorie goals continues assistant.
+- After discussing a video game, "What time does your salon close?" switches
+  to faq, and "I want to book a haircut" switches to booking.
+
+Previous intent (if known): {state.get("intent") or "none"}
 
 Recent conversation:
 {conversation}
@@ -203,7 +216,6 @@ def extract_appointment_details(state: AgentState):
         for field in missing_fields
     )
     print("🧠 Sending details extraction to LLM...")
-    print("📝 Message:", user_message)
     print("🎯 Fields:", missing_fields)
 
     result = details_llm.invoke(
@@ -379,8 +391,6 @@ Customer message:
         )
 
         print("🕐 TIME DEBUG")
-        print("User message:", user_message)
-        print("Normalized time:", normalized_time)
 
         if normalized_time:
             updates["appointment_time"] = normalized_time
@@ -399,7 +409,6 @@ Customer message:
     # DEBUG
     # ---------------------------------------------------------
 
-    print("📦 EXTRACTION UPDATES:", updates)
 
     return updates
 
@@ -613,13 +622,15 @@ from zoneinfo import ZoneInfo
 
 from app.services.calendar_service import (
     book_calendar_event,
-    delete_calendar_event
+    delete_calendar_event,
+    move_calendar_event,
+    restore_calendar_event_time,
 )
 from app.agent.tools import (
     confirm_appointment,
     mark_appointment_failed
 )
-from app.services.email_service import send_booking_confirmation
+from app.services.email_service import send_booking_confirmation, send_email
 
 
 def confirm_booking_node(state: AgentState):
@@ -712,9 +723,9 @@ def confirm_booking_node(state: AgentState):
                 )
 
                 email_sent = email_result.get("success", False)
-                print("Booking confirmation email sent:", email_result)
+                print("Booking confirmation email accepted:", email_sent)
             except Exception as email_error:
-                print("Booking email failed:", email_error)
+                print("Booking email failed:", type(email_error).__name__)
 
 
         return {
@@ -732,7 +743,7 @@ def confirm_booking_node(state: AgentState):
             ]
         }
     except Exception as exc:
-        print(f"Booking integration error: {exc}")
+        print(f"Booking integration error: {type(exc).__name__}")
 
 
         # 5 clean calendar event if it was created
@@ -741,7 +752,7 @@ def confirm_booking_node(state: AgentState):
             try:
                 delete_calendar_event(calendar_event_id)
             except Exception as cleanup_error:
-                print(f"Calendar cleanup failed: {cleanup_error}")
+                print(f"Calendar cleanup failed: {type(cleanup_error).__name__}")
 
         mark_appointment_failed(appointment_id)
 
@@ -878,11 +889,7 @@ Customer message:
 {user_message}
 """
     )
-    print("CUSTOMER MESSAGE:", user_message)
-    print("EXTRACTED DATE:", result.appointment_date)
-    print("EXTRACTED TIME:", result.appointment_time)
 
-    print("🔥 EXTRACTED:", result)
 
     updates = {}
 
@@ -897,7 +904,6 @@ Customer message:
             result.appointment_time
         )
 
-    print("🔥 CANCELLATION UPDATES:", updates)
 
     return updates
 
@@ -906,9 +912,6 @@ def cancellation_node(state: AgentState):
     customer_phone = state.get("customer_phone", "")
     appointment_date = state.get("cancellation_date", "")
     appointment_time = state.get("cancellation_time", "")
-    print("PHONE:", customer_phone)
-    print("CANCELLATION DATE:", appointment_date)
-    print("CANCELLATION TIME:", appointment_time)
 
     
 
@@ -925,11 +928,6 @@ def cancellation_node(state: AgentState):
             "cancellation_in_progress": True,
         }
 
-    print("FILTERS BEING SENT:", {
-    "customer_phone": customer_phone,
-    "appointment_date": appointment_date or None,
-    "appointment_time": appointment_time or None
-    })
 
     appointments = find_appointments.invoke({
     "customer_phone": customer_phone,
@@ -1059,7 +1057,6 @@ def confirm_cancellation_node(state: AgentState):
         "customer_phone":customer_phone
     })
 
-    print("APPOINTMENT FOUND:", appointment)
 
     if not appointment:
         return {
@@ -1080,7 +1077,7 @@ def confirm_cancellation_node(state: AgentState):
             )
             print("Google Calendar event deleted successfully")
         except Exception as e:
-            print("❌ Google Calendar deletion failed:", repr(e))
+            print("❌ Google Calendar deletion failed:", type(e).__name__)
 
             return {
                 "awaiting_cancellation_confirmation":False,
@@ -1389,23 +1386,69 @@ def confirm_reschedule_node(state:AgentState):
             ],
         }
 
-    result = reschedule_appointment.invoke({
-        "appointment_id": appointment["id"],
-        "new_date":new_date,
-        "new_time":new_time,
-    })
-    
-    if not result["success"]:
+    failure = {
+        "awaiting_reschedule_confirmation": False,
+        "reschedule_selected_appointment_id": None,
+        "reschedule_confirmed": False,
+    }
+    event_id = appointment["calendar_event_id"]
+    if not event_id:
         return {
-            "awaiting_reschedule_confirmation": False,
-            "reschedule_selected_appointment_id": None,
-            "reschedule_confirmed": False,
-            "messages": [
-                AIMessage(
-                    content=result["message"]
-                )
-            ],
+            **failure,
+            "messages": [AIMessage(
+                content="I couldn't find the calendar event for this appointment. Please contact our team."
+            )],
         }
+
+    logger = logging.getLogger(__name__)
+    try:
+        new_start = datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M")
+        new_start = new_start.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        restore_details = move_calendar_event(event_id, new_start)
+    except Exception:
+        logger.warning("Calendar reschedule failed or could not be verified")
+        return {
+            **failure,
+            "messages": [AIMessage(
+                content="I couldn't verify the calendar change. Please contact our team before trying again."
+            )],
+        }
+
+    if restore_details is None:
+        return {
+            **failure,
+            "messages": [AIMessage(
+                content="That time is no longer available in our calendar. Please choose another time."
+            )],
+        }
+
+    try:
+        result = reschedule_appointment.invoke({
+            "appointment_id": appointment["id"],
+            "new_date": new_date,
+            "new_time": new_time,
+        })
+    except Exception:
+        logger.error("Database reschedule outcome could not be verified")
+        return {
+            **failure,
+            "messages": [AIMessage(
+                content="I couldn't verify the reschedule. Please contact our team before trying again."
+            )],
+        }
+
+    if not result["success"]:
+        try:
+            restore_calendar_event_time(event_id, *restore_details)
+        except Exception:
+            logger.error("Calendar event could not be restored after a database reschedule failure")
+            return {
+                **failure,
+                "messages": [AIMessage(
+                    content="I couldn't verify your appointment time. Please contact our team before trying again."
+                )],
+            }
+        return {**failure, "messages": [AIMessage(content=result["message"])]}
 
     return {
         "awaiting_reschedule_confirmation": False,
@@ -1528,7 +1571,6 @@ Customer message:
 """
     )
 
-    print("🔥 LEAD EXTRACTED:", result)
 
     updates = {}
 
@@ -1634,35 +1676,68 @@ def lead_node(state: AgentState):
     }
 
 
-def human_node(state:AgentState):
-    customer_name=state.get("customer_name","")
-    customer_phone=state.get("customer_phone","")
+def human_node(state: AgentState):
+    recipient = os.getenv("HANDOFF_NOTIFICATION_EMAIL", "").strip()
+    if not recipient:
+        return {
+            "awaiting_handoff_phone": False,
+            "messages": [AIMessage(content=(
+                "Callback requests are unavailable right now. Please contact the business directly."
+            ))],
+        }
 
-    result=create_human_handoff.invoke({
-        "session_id":state["session_id"],
-        "customer_name":customer_name,
-        "customer_phone":customer_phone,
+    if state.get("awaiting_handoff_phone"):
+        reply = state["messages"][-1].content
+        if isinstance(reply, str) and reply.strip().lower().rstrip(".!") in {
+            "cancel", "never mind", "no thanks",
+        }:
+            return {
+                "awaiting_handoff_phone": False,
+                "messages": [AIMessage(content="Okay, I've cancelled the callback request.")],
+            }
+        customer_phone = normalize_phone(reply) if isinstance(reply, str) else None
+    else:
+        customer_phone = normalize_phone(state.get("customer_phone"))
+
+    if not customer_phone:
+        return {
+            "awaiting_handoff_phone": True,
+            "messages": [AIMessage(content="What phone number should our team call you back on?")],
+        }
+
+    result = create_human_handoff.invoke({
+        "session_id": state["session_id"],
+        "customer_name": state.get("customer_name"),
+        "customer_phone": customer_phone,
         "reason": "Customer requested human assistance",
     })
     if not result["success"]:
         return {
-            "messages": [
-                AIMessage(
-                    content=(
-                        "I'm sorry, I couldn't connect your request "
-                        "to our team right now. Please try again."
-                    )
-                )
-            ]
+            "awaiting_handoff_phone": False,
+            "messages": [AIMessage(content=(
+                "I couldn't save your callback request. Please contact the business directly."
+            ))],
+        }
+
+    handoff_id = result["handoff_id"]
+    try:
+        notification = send_email(
+            to_email=recipient,
+            subject=f"Callback requested (reference {handoff_id})",
+            body=f"A caller requested human assistance. Please call them back at {customer_phone}.",
+        )
+        if not notification.get("success"):
+            raise RuntimeError("Notification unsuccessful")
+    except Exception:
+        logging.getLogger(__name__).error("Staff notification failed for handoff %s", handoff_id)
+        return {
+            "awaiting_handoff_phone": False,
+            "messages": [AIMessage(content=(
+                "I saved your request, but couldn't notify our team. Please contact the business directly."
+            ))],
         }
 
     return {
-        "messages": [
-            AIMessage(
-                content=(
-                    "Sure. I've forwarded your request to our team. "
-                    "Someone will assist you shortly."
-                )
-            )
-        ]
+        "awaiting_handoff_phone": False,
+        "messages": [AIMessage(content="I've sent your callback request to our team.")],
     }

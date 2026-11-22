@@ -110,6 +110,9 @@ def route_start(state: AgentState):
     if state.get("lead_in_progress", False):
         return "extract_lead_details"
 
+    if state.get("awaiting_handoff_phone", False):
+        return "human"
+
     return "intent"
 
 
@@ -118,6 +121,7 @@ graph_builder.add_conditional_edges(
     route_start,
     {
         "intent": "intent",
+        "human": "human",
         "assistant":"assistant",
         "extract_appointment_details": "extract_appointment_details",
         "confirmation": "confirmation",
