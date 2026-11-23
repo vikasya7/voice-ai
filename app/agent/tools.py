@@ -1,4 +1,6 @@
-from sqlalchemy import select 
+from uuid import uuid4
+
+from sqlalchemy import func, select
 from app.database.database import SessionLocal 
 from app.database.models import Appointment
 from app.database.models import Lead,HumanHandoff,ConversationLog
@@ -63,6 +65,31 @@ def book_appointment(
     db=SessionLocal()
 
     try:
+        # Serialize retries for this conversation and slot while allocating the row.
+        lock_key = f"booking:{session_id}:{appointment_date}:{appointment_time}"
+        db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0))))
+        previous = db.scalar(
+            select(Appointment).where(
+                Appointment.session_id == session_id,
+                Appointment.appointment_date == appointment_date,
+                Appointment.appointment_time == appointment_time,
+                Appointment.customer_name == customer_name,
+                Appointment.customer_phone == customer_phone,
+                Appointment.customer_email == customer_email,
+                Appointment.service == service,
+                Appointment.duration_minutes == duration_minutes,
+                Appointment.status.in_(("pending", "confirmed")),
+                Appointment.calendar_event_id.is_not(None),
+            ).order_by(Appointment.status, Appointment.id)
+        )
+        if previous:
+            return {
+                "success": True,
+                "appointment_id": previous.id,
+                "calendar_event_id": previous.calendar_event_id,
+                "already_confirmed": previous.status == "confirmed",
+            }
+
         existing=db.scalar(
             select(Appointment).where(
                 Appointment.appointment_date==appointment_date,
@@ -85,27 +112,26 @@ def book_appointment(
         service=service,
         duration_minutes=duration_minutes,
         status="pending",
+        calendar_event_id=uuid4().hex,
         )
         # for race condition if two persons try to book at same time
-        db.add(appointment)
         try:
+            db.add(appointment)
+            db.flush()
+            result = {
+                "success": True,
+                "appointment_id": appointment.id,
+                "calendar_event_id": appointment.calendar_event_id,
+                "already_confirmed": False,
+            }
             db.commit()
+            return result
         except IntegrityError:
             db.rollback()
-
             return {
-                "success":False,
-                "message": (
-                    "Sorry, this appointment slot was just booked "
-                    "by someone else."
-                ),
+                "success": False,
+                "message": "Sorry, this appointment slot was just booked by someone else.",
             }
-        db.refresh(appointment)
-
-        return {
-            "success":True,
-            "appointment_id":appointment.id
-        }
     except Exception:
         db.rollback()
 
@@ -504,11 +530,13 @@ def confirm_appointment(
 
 
     try:
-        appointment=db.get(Appointment,appointment_id)
-
-        if not appointment or appointment.status!="pending":
+        appointment = db.get(Appointment, appointment_id, with_for_update=True)
+        if (
+            not appointment
+            or appointment.status != "pending"
+            or appointment.calendar_event_id != calendar_event_id
+        ):
             return False
-        appointment.calendar_event_id=calendar_event_id
         appointment.status="confirmed"
 
         db.commit()

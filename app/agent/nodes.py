@@ -596,6 +596,16 @@ Customer message:
             "booking_confirmed": True,
         }
 
+    if state.get("booking_reconciliation_pending"):
+        return {
+            "booking_confirmed": False,
+            "awaiting_confirmation": False,
+            "booking_reconciliation_pending": False,
+            "messages": [AIMessage(content=(
+                "I'll stop checking. Please ask our team to verify whether the appointment was booked."
+            ))],
+        }
+
     return {
         "booking_confirmed": False,
         "awaiting_confirmation": False,
@@ -649,6 +659,7 @@ def confirm_booking_node(state: AgentState):
     if not result["success"]:
         return {
             "awaiting_confirmation":False,
+            "booking_reconciliation_pending": False,
             "booking_confirmed":False,
             "messages":[
                 AIMessage(content=result["message"])
@@ -656,7 +667,15 @@ def confirm_booking_node(state: AgentState):
         }
 
     appointment_id=result["appointment_id"]
-    calendar_event_id=None
+    calendar_event_id = result["calendar_event_id"]
+
+    if result["already_confirmed"]:
+        return {
+            "awaiting_confirmation": False,
+            "booking_reconciliation_pending": False,
+            "booking_confirmed": True,
+            "messages": [AIMessage(content=f"Your appointment is already confirmed. Your appointment ID is {appointment_id}.")],
+        }
 
     try:
         # 2 contruct timezone-aware start and end
@@ -676,7 +695,8 @@ def confirm_booking_node(state: AgentState):
             start=start,
             end=end,
             customer_phone=state.get("customer_phone") or "",
-            customer_email=state.get("customer_email")
+            customer_email=state.get("customer_email"),
+            event_id=calendar_event_id,
         )
 
         if not calendar_result["success"]:
@@ -684,6 +704,7 @@ def confirm_booking_node(state: AgentState):
 
             return {
                 "awaiting_confirmation":False,
+                "booking_reconciliation_pending": False,
                 "booking_confirmed":False,
                 "messages":[
                     AIMessage(
@@ -691,8 +712,6 @@ def confirm_booking_node(state: AgentState):
                     )
                 ]
             }
-
-        calendar_event_id=calendar_result["event_id"]
 
         #4 Confirm appointment in postgresql
         confirmed=confirm_appointment(
@@ -730,6 +749,7 @@ def confirm_booking_node(state: AgentState):
 
         return {
             "awaiting_confirmation":False,
+            "booking_reconciliation_pending": False,
             "booking_confirmed":True,
             "messages":[
                 AIMessage(
@@ -743,32 +763,20 @@ def confirm_booking_node(state: AgentState):
             ]
         }
     except Exception as exc:
-        print(f"Booking integration error: {type(exc).__name__}")
-
-
-        # 5 clean calendar event if it was created
-
-        if calendar_event_id:
-            try:
-                delete_calendar_event(calendar_event_id)
-            except Exception as cleanup_error:
-                print(f"Calendar cleanup failed: {type(cleanup_error).__name__}")
-
-        mark_appointment_failed(appointment_id)
-
+        logging.getLogger(__name__).warning(
+            "Booking outcome could not be verified for appointment %s (%s)",
+            appointment_id,
+            type(exc).__name__,
+        )
         return {
-            "awaiting_confirmation": False,
+            "awaiting_confirmation": True,
+            "booking_reconciliation_pending": True,
             "booking_confirmed": False,
-            "messages": [
-                AIMessage(
-                    content=(
-                        "Sorry, we couldn't complete your booking "
-                        "because of a technical issue. Please try again."
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=(
+                "I couldn't verify your booking yet. Say yes to check the same booking again, "
+                "or contact our team before making another booking."
+            ))],
         }
-        
 
 
 
