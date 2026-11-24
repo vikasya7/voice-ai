@@ -17,7 +17,8 @@ from app.agent.tools import (
     cancel_appointment,
     reschedule_appointment,
     save_lead,
-    create_human_handoff
+    create_human_handoff,
+    set_handoff_notification_status,
 )
 from app.rag.knowledge import get_retriever
 
@@ -1685,9 +1686,34 @@ def lead_node(state: AgentState):
 
 
 def human_node(state: AgentState):
+    # A callback request ends the active workflow so a later "yes" cannot
+    # confirm an appointment the caller stopped discussing.
+    workflow_updates = {
+        "intent": "human",
+        "assistant_response": None,
+        "spoken_response": None,
+        "sources": [],
+        "awaiting_confirmation": False,
+        "booking_confirmed": False,
+        "booking_in_progress": False,
+        "booking_reconciliation_pending": False,
+        "awaiting_new_time": False,
+        "awaiting_cancellation_confirmation": False,
+        "cancellation_confirmed": False,
+        "cancellation_in_progress": False,
+        "selected_appointment_id": None,
+        "awaiting_reschedule_confirmation": False,
+        "reschedule_confirmed": False,
+        "reschedule_in_progress": False,
+        "reschedule_choices": [],
+        "reschedule_selected_appointment_id": None,
+        "lead_in_progress": False,
+    }
     recipient = os.getenv("HANDOFF_NOTIFICATION_EMAIL", "").strip()
-    if not recipient:
+    queue_enabled = bool(os.getenv("STAFF_HANDOFF_API_KEY"))
+    if not recipient and not queue_enabled:
         return {
+            **workflow_updates,
             "awaiting_handoff_phone": False,
             "messages": [AIMessage(content=(
                 "Callback requests are unavailable right now. Please contact the business directly."
@@ -1700,6 +1726,7 @@ def human_node(state: AgentState):
             "cancel", "never mind", "no thanks",
         }:
             return {
+                **workflow_updates,
                 "awaiting_handoff_phone": False,
                 "messages": [AIMessage(content="Okay, I've cancelled the callback request.")],
             }
@@ -1709,6 +1736,7 @@ def human_node(state: AgentState):
 
     if not customer_phone:
         return {
+            **workflow_updates,
             "awaiting_handoff_phone": True,
             "messages": [AIMessage(content="What phone number should our team call you back on?")],
         }
@@ -1721,6 +1749,7 @@ def human_node(state: AgentState):
     })
     if not result["success"]:
         return {
+            **workflow_updates,
             "awaiting_handoff_phone": False,
             "messages": [AIMessage(content=(
                 "I couldn't save your callback request. Please contact the business directly."
@@ -1728,24 +1757,37 @@ def human_node(state: AgentState):
         }
 
     handoff_id = result["handoff_id"]
-    try:
-        notification = send_email(
-            to_email=recipient,
-            subject=f"Callback requested (reference {handoff_id})",
-            body=f"A caller requested human assistance. Please call them back at {customer_phone}.",
-        )
-        if not notification.get("success"):
-            raise RuntimeError("Notification unsuccessful")
-    except Exception:
-        logging.getLogger(__name__).error("Staff notification failed for handoff %s", handoff_id)
-        return {
-            "awaiting_handoff_phone": False,
-            "messages": [AIMessage(content=(
-                "I saved your request, but couldn't notify our team. Please contact the business directly."
-            ))],
-        }
+    reply = "I've saved your callback request for our team."
+    if recipient:
+        accepted = False
+        try:
+            notification = send_email(
+                to_email=recipient,
+                subject=f"Callback requested (reference {handoff_id})",
+                body=f"A caller requested human assistance. Please call them back at {customer_phone}.",
+            )
+            accepted = bool(notification.get("success"))
+        except Exception:
+            pass
+
+        logger = logging.getLogger(__name__)
+        try:
+            set_handoff_notification_status(handoff_id, accepted=accepted)
+        except Exception:
+            logger.error("Could not record notification status for handoff %s", handoff_id)
+
+        if accepted:
+            reply = "I've sent your callback request to our team."
+        else:
+            logger.warning("Staff notification could not be confirmed for handoff %s", handoff_id)
+            if not queue_enabled:
+                reply = (
+                    "I saved your request, but couldn't confirm that our team was notified. "
+                    "Please contact the business directly."
+                )
 
     return {
+        **workflow_updates,
         "awaiting_handoff_phone": False,
-        "messages": [AIMessage(content="I've sent your callback request to our team.")],
+        "messages": [AIMessage(content=reply)],
     }

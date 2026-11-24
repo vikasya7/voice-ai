@@ -1,7 +1,7 @@
 
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from fastapi import UploadFile,File
@@ -10,7 +10,7 @@ from app.voice.stt import speech_to_text
 from app.voice.tts import text_to_speech
 from app.database.database import Base, engine
 from app.database import models
-from app.agent.tools import log_conversation
+from app.agent.tools import complete_handoff, list_open_handoffs, log_conversation
 from fastapi.responses import Response
 
 class _AccessLogFilter(logging.Filter):
@@ -108,14 +108,8 @@ def handle_call(request: CallRequest):
         config=config,
     )
 
-    response_text = result.get(
-    "assistant_response",
-    result["messages"][-1].content,
-)
-    spoken_response = result.get(
-    "spoken_response",
-    response_text,
-    )
+    response_text = result.get("assistant_response") or result["messages"][-1].content
+    spoken_response = result.get("spoken_response") or response_text
     sources = result.get("sources", [])
     intent = result.get("intent")
 
@@ -808,3 +802,30 @@ def outbound_call(
             status_code=500,
             detail="Could not start the outbound call.",
         ) from exc
+
+
+def require_staff_handoff_key(
+    api_key: str | None = Header(default=None, alias="X-Staff-Handoff-Key"),
+):
+    expected_key = os.getenv("STAFF_HANDOFF_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="Staff callback queue is disabled.")
+    if not api_key or not secrets.compare_digest(api_key.encode(), expected_key.encode()):
+        raise HTTPException(status_code=401, detail="Invalid staff callback API key.")
+
+
+@app.get("/staff/handoffs", dependencies=[Depends(require_staff_handoff_key)])
+def get_staff_handoffs(
+    response: Response,
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return list_open_handoffs(after_id, limit)
+
+
+@app.post("/staff/handoffs/{handoff_id}/complete", dependencies=[Depends(require_staff_handoff_key)])
+def complete_staff_handoff(handoff_id: int):
+    if not complete_handoff(handoff_id):
+        raise HTTPException(status_code=404, detail="Callback request not found.")
+    return {"id": handoff_id, "status": "completed"}

@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from app.database.database import SessionLocal 
 from app.database.models import Appointment
 from app.database.models import Lead,HumanHandoff,ConversationLog
@@ -473,6 +473,52 @@ def create_human_handoff(
         db.close()
     
     
+
+def set_handoff_notification_status(handoff_id: int, *, accepted: bool) -> None:
+    status = "notification_sent" if accepted else "notification_unconfirmed"
+    with SessionLocal.begin() as db:
+        db.execute(
+            update(HumanHandoff)
+            .where(HumanHandoff.id == handoff_id, HumanHandoff.status == "pending")
+            .values(status=status)
+        )
+
+
+def list_open_handoffs(after_id: int, limit: int) -> dict:
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(HumanHandoff)
+            .where(HumanHandoff.id > after_id, HumanHandoff.status != "completed")
+            .order_by(HumanHandoff.id)
+            .limit(limit + 1)
+        ).all()
+        requests = [
+            {
+                "id": row.id,
+                "customer_name": row.customer_name,
+                "customer_phone": row.customer_phone,
+                "reason": row.reason,
+                "status": row.status,
+                "created_at": row.created_at,
+            }
+            for row in rows[:limit]
+        ]
+    return {
+        "requests": requests,
+        "next_after_id": requests[-1]["id"] if len(rows) > limit else None,
+    }
+
+
+def complete_handoff(handoff_id: int) -> bool:
+    with SessionLocal.begin() as db:
+        updated_id = db.scalar(
+            update(HumanHandoff)
+            .where(HumanHandoff.id == handoff_id)
+            .values(status="completed")
+            .returning(HumanHandoff.id)
+        )
+    return updated_id is not None
+
 
 @tool
 def log_conversation(
