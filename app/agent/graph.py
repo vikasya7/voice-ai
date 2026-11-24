@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 from langgraph.graph import StateGraph, START, END
@@ -87,7 +88,26 @@ graph_builder.add_node("assistant", assistant_node)
 # START ROUTING
 # -------------------------
 
+_HUMAN_REQUEST = re.compile(
+    r"(?:please )?(?:(?:i (?:want|need) to |(?:can|could|may) i )?"
+    r"(?:speak|talk) (?:to|with) |(?:(?:can|could|would) you )?"
+    r"(?:connect|transfer|put) me (?:to|through to) |i (?:want|need) )?"
+    r"(?:(?:a |an |the )?(?:real person|person|human agent|human|"
+    r"staff member|representative|operator)|someone|staff)(?: please)?"
+)
+
+
 def route_start(state: AgentState):
+    messages = state.get("messages", [])
+    if messages and messages[-1].type == "human":
+        content = messages[-1].content
+        if isinstance(content, str):
+            text = " ".join(re.sub(r"[^\w\s]", " ", content.casefold()).split())
+            if _HUMAN_REQUEST.fullmatch(text):
+                return "human"
+
+    if state.get("awaiting_handoff_phone", False):
+        return "human"
 
     if state.get("awaiting_confirmation", False):
         return "confirmation"
@@ -109,9 +129,6 @@ def route_start(state: AgentState):
 
     if state.get("lead_in_progress", False):
         return "extract_lead_details"
-
-    if state.get("awaiting_handoff_phone", False):
-        return "human"
 
     return "intent"
 

@@ -257,6 +257,22 @@ The backend needs PostgreSQL, OpenAI, and Sarvam settings at startup. For Twilio
 
 Keep your filled-in `.env` and Google OAuth files private.
 
+#### Staff callback queue
+
+Set `STAFF_HANDOFF_API_KEY` to a separate random secret and restart the backend.
+Staff can send that secret in the `X-Staff-Handoff-Key` header using the live app's
+`/docs` page or a private API client.
+
+- `GET /staff/handoffs` lists open requests. Use `next_after_id` as the next
+  request's `after_id` when there are more results.
+- `POST /staff/handoffs/{handoff_id}/complete` marks a request complete after
+  staff call back. Completed requests are excluded from the open list.
+
+`pending` means there is no recorded email outcome. `notification_sent` means
+Gmail accepted the notification. `notification_unconfirmed` means the send
+could not be verified. All three statuses appear in the open queue. Staff can
+use the queue with or without `HANDOFF_NOTIFICATION_EMAIL`.
+
 ### 5. Configure Google OAuth
 
 1. Create a project in Google Cloud Console.
