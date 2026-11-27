@@ -1,6 +1,6 @@
 # AI Voice Receptionist
 
-An AI-powered voice receptionist that automates customer conversations, appointment management and business communication through natural voice interactions.
+An open-source, general-purpose AI phone receptionist for small businesses. It answers calls, handles common questions, manages appointments, and captures requests for a staff callback.
 
 Built using **Python, FastAPI, LangGraph, PostgreSQL, Twilio and OpenAI**, the system can understand customer requests, manage appointment workflows, integrate with Google Calendar and send email confirmations.
 
@@ -174,6 +174,8 @@ voice-agent/
 ```
 
 ## Try the local demo
+
+Rose Salon is an example business for exploring appointment and callback workflows.
 
 With Python 3.11 active, run these commands from the repository root.
 
@@ -450,3 +452,7 @@ The long-term goal is to build an intelligent AI receptionist platform that help
 ---
 
 **Built with Python, FastAPI, LangGraph and AI.**
+
+## License
+
+Licensed under the [MIT License](LICENSE).
