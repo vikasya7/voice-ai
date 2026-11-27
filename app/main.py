@@ -87,10 +87,22 @@ def split_response_and_sources(response_text: str):
 
     return spoken_response, sources
 
+import os
 
+def require_live_api_key(
+    api_key:str | None=Header(default=None,alias="X-Live-API-Key"),
 
+)->None:
+    expected_key=os.getenv("LIVE_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503,detail="LIVE API IS DIABLED")
 
-@app.post("/call")
+    if not api_key or not secrets.compare_digest(
+        api_key.encode(),expected_key.encode()
+    ):
+        raise HTTPException(status_code=401,detail="Invalid live API KEY")
+
+@app.post("/call",dependencies=[Depends(require_live_api_key)])
 def handle_call(request: CallRequest):
     config = {
         "configurable": {
@@ -132,7 +144,7 @@ def handle_call(request: CallRequest):
     }
 
 
-@app.post("/voice")
+@app.post("/voice",dependencies=[Depends(require_live_api_key)])
 async def voice_call(
     session_id:str,
     audio:UploadFile=File(...)
